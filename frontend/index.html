@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Line Trade LLM — ライン管理</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/klinecharts@10.0.3/dist/umd/klinecharts.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Line Trade LLM</h1>
+    <div class="controls">
+      <label>API Base <input id="apiBase" type="text" value="http://localhost:8787" /></label>
+      <label>Symbol <input id="symbol" type="text" value="BTC" /></label>
+      <button id="reload">読み込み</button>
+    </div>
+  </header>
+
+  <div class="draw-controls">
+    <span>ライン描画モード:</span>
+    <button id="modeHorizontal" data-mode="horizontal">水平線 (1クリック)</button>
+    <button id="modeTrend" data-mode="trend">トレンドライン (2クリック)</button>
+    <button id="modeNone" data-mode="none" class="active">なし</button>
+    <span id="drawHint"></span>
+  </div>
+
+  <div id="chart"></div>
+
+  <section>
+    <h2>登録済みライン</h2>
+    <table id="linesTable">
+      <thead>
+        <tr>
+          <th>種別</th>
+          <th>Symbol</th>
+          <th>ポイント</th>
+          <th>作成日時</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <script src="./app.js"></script>
+</body>
+</html>

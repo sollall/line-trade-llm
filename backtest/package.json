@@ -1,0 +1,22 @@
+{
+  "name": "backtest",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "bin": {
+    "backtest": "./dist/index.js"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "shared": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  }
+}
