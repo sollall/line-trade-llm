@@ -1,0 +1,35 @@
+name = "line-trade-llm"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+# 1-minute poll, per spec section 4 (Cron Trigger). Free plan allows down to
+# 1-minute intervals.
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+# Which exchange to poll live. "hyperliquid" | "backpack".
+EXCHANGE = "hyperliquid"
+# Candle interval used both for touch polling context and backtests, minutes.
+CANDLE_INTERVAL_MINUTES = "1"
+# How many recent candles are fed to the LLM per judgment.
+CANDLE_WINDOW = "15"
+# Relative distance (fraction of price) within which a touch is registered.
+TOUCH_THRESHOLD_PCT = "0.0005"
+# Max undetermined re-judgments before a touch event times out (spec 6.4).
+MAX_UNDETERMINED_RETRIES = "8"
+CLAUDE_MODEL = "claude-sonnet-5"
+
+# `wrangler d1 create line_trade_llm` then paste the returned database_id here.
+[[d1_databases]]
+binding = "DB"
+database_name = "line_trade_llm"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# `wrangler kv namespace create LLM_CACHE` then paste the returned id here.
+[[kv_namespaces]]
+binding = "LLM_CACHE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Secrets (do NOT put these here): set with
+#   wrangler secret put ANTHROPIC_API_KEY
