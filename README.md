@@ -33,6 +33,18 @@ npx wrangler secret put ANTHROPIC_API_KEY   # Claude APIキー
 npm run db:migrate:remote                   # schema.sql をD1に適用(ローカル開発時は db:migrate:local)
 ```
 
+#### APIトークンの権限
+
+`wrangler login`(ブラウザ認証)ではなく `CLOUDFLARE_API_TOKEN` で非対話的に認証する場合、Cloudflareダッシュボード → My Profile → API Tokens → Create Token → Custom Token で以下の**Account**権限を付与してください(Zone権限は独自ドメインを紐付けない限り不要です):
+
+| 権限 | スコープ | 用途 |
+|---|---|---|
+| D1 | Edit | `wrangler d1 create` / `db:migrate` |
+| Workers KV Storage | Edit | `wrangler kv namespace create`、LLM判定キャッシュ |
+| Workers Scripts | Edit | `wrangler deploy` / `wrangler secret put` / Cron Trigger設定 |
+
+`ANTHROPIC_API_KEY` の方はCloudflareのような権限チェックボックスはありませんが、Anthropic Console (console.anthropic.com) で本番運用専用の**Workspace**を作ってそこで発行すると、他用途のキーと混ざらず使用量・コストを追跡できます。Admin APIキー(Workspace/Member管理用)は不要で、通常のAPIキーで十分です。
+
 `wrangler.toml` の `[vars]` で以下を調整できます:
 
 | 変数 | 意味 | デフォルト |
