@@ -33,6 +33,11 @@ npx wrangler secret put ANTHROPIC_API_KEY   # Claude APIキー
 npm run db:migrate:remote                   # schema.sql をD1に適用(ローカル開発時は db:migrate:local)
 ```
 
+#### APIトークンの権限設定
+
+- `ANTHROPIC_API_KEY`: [Anthropic Console](https://console.anthropic.com/settings/keys) で発行するキーです。このWorkerが使うのはMessages API(判定リクエスト)のみで、Admin API(組織設定・メンバー管理・他キーの発行/失効など)の権限は不要です。Cron Triggerから自動的に呼び出され続ける常駐シークレットになるため、可能であれば他のプロジェクトと共有せず本プロジェクト専用のWorkspaceを作成してキーを発行し、Workspace側で使用量上限(spend limit)を設定しておくことを推奨します。漏洩時の影響範囲を絞るためです。
+- 取引所(`hyperliquid` / `backpack`)側は本実装では公開のマーケットデータエンドポイント(現在値・ローソク足取得)のみを叩いており、APIキーや署名は一切使用していません。v0.2は自動発注非対応(判定ロジック検証のみ)のため、取引所側の資産にアクセスできるキーを発行・設定する必要はありません。
+
 `wrangler.toml` の `[vars]` で以下を調整できます:
 
 | 変数 | 意味 | デフォルト |
