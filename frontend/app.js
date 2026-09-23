@@ -1,5 +1,5 @@
 // Plain-JS line drawing UI on top of TradingView Lightweight Charts (loaded via CDN in index.html).
-// Talks to the Cloudflare Worker API (GET/POST /lines, DELETE /lines/{id}, GET /candles).
+// Talks to the Cloudflare Worker API (GET/POST /lines, DELETE /lines/{id}, GET /lines/{id}/checks, GET /candles).
 
 const state = {
   chart: null,
@@ -16,6 +16,17 @@ const state = {
   previewPoints: null, // [p0, cursor] while placing the 2nd trend line point
   selectedLineId: null,
   hoveredLineId: null, // under the cursor on the chart, or its row in the table
+  checksGeneration: 0, // bumped per history load so a slow response for another line is dropped
+};
+
+const DEFAULT_CHECK_INTERVAL = "15";
+
+const STATE_LABELS = {
+  holding_above: "上で維持",
+  holding_below: "下で維持",
+  testing: "試している最中",
+  broken_up: "上抜け確定",
+  broken_down: "下抜け確定",
 };
 
 const LINE_COLOR = "#f0b429";
@@ -37,6 +48,13 @@ const el = {
   linesTableBody: document.querySelector("#linesTable tbody"),
   modeButtons: document.querySelectorAll(".draw-controls button[data-mode]"),
   deleteSelected: document.getElementById("deleteSelected"),
+  checkInterval: document.getElementById("checkInterval"),
+  checksSection: document.getElementById("checksSection"),
+  checksLineLabel: document.getElementById("checksLineLabel"),
+  checksChangesOnly: document.getElementById("checksChangesOnly"),
+  checksReload: document.getElementById("checksReload"),
+  checksTableBody: document.querySelector("#checksTable tbody"),
+  checksEmpty: document.getElementById("checksEmpty"),
 };
 
 function apiBase() {
@@ -351,11 +369,23 @@ function refreshLineStyles() {
     tr.classList.toggle("hovered", tr.dataset.lineId === state.hoveredLineId);
   }
   el.deleteSelected.hidden = state.selectedLineId === null;
+  if (state.selectedLineId === null) el.checksSection.hidden = true;
 }
 
 function describeLine(line) {
   const kind = line.kind === "horizontal" ? "水平線" : "トレンドライン";
   return `${kind} ${line.points.map((p) => p.price.toFixed(2)).join(" → ")}`;
+}
+
+function intervalLabel(minutes) {
+  return el.interval.querySelector(`option[value="${minutes}"]`)?.textContent ?? `${minutes}分`;
+}
+
+function stateCell(lineState) {
+  const span = document.createElement("span");
+  span.className = `state state-${lineState ?? "none"}`;
+  span.textContent = lineState ? STATE_LABELS[lineState] ?? lineState : "未判定";
+  return span;
 }
 
 function selectLine(id) {
@@ -365,6 +395,63 @@ function selectLine(id) {
     ? `選択中: ${describeLine(line)}(Deleteキーでも削除 / Escで解除)`
     : "";
   refreshLineStyles();
+  loadChecks().catch((err) => {
+    console.error(err);
+    el.drawHint.textContent = `判定履歴の読み込みエラー: ${err.message}`;
+  });
+}
+
+// --- check history of the selected line ---
+
+function renderChecks(checks) {
+  el.checksTableBody.innerHTML = "";
+  for (const check of checks) {
+    const tr = document.createElement("tr");
+
+    const timeTd = document.createElement("td");
+    timeTd.textContent = new Date(check.candle_timestamp).toLocaleString();
+    tr.appendChild(timeTd);
+
+    const stateTd = document.createElement("td");
+    stateTd.appendChild(stateCell(check.state));
+    if (check.state_changed && check.previous_state) {
+      stateTd.appendChild(document.createTextNode(` ← ${STATE_LABELS[check.previous_state] ?? check.previous_state}`));
+    }
+    tr.appendChild(stateTd);
+
+    const confidenceTd = document.createElement("td");
+    confidenceTd.textContent = check.confidence.toFixed(2);
+    tr.appendChild(confidenceTd);
+
+    const reasoningTd = document.createElement("td");
+    reasoningTd.textContent = check.reasoning;
+    tr.appendChild(reasoningTd);
+
+    const promptTd = document.createElement("td");
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = check.from_cache ? `${check.model}(キャッシュ)` : check.model;
+    const pre = document.createElement("pre");
+    pre.textContent = check.prompt;
+    details.append(summary, pre);
+    promptTd.appendChild(details);
+    tr.appendChild(promptTd);
+
+    el.checksTableBody.appendChild(tr);
+  }
+  el.checksEmpty.hidden = checks.length > 0;
+}
+
+async function loadChecks() {
+  const generation = ++state.checksGeneration;
+  const line = state.lines.find((l) => l.id === state.selectedLineId);
+  el.checksSection.hidden = !line;
+  if (!line) return;
+  el.checksLineLabel.textContent = `${describeLine(line)} / 判定足 ${intervalLabel(line.check_interval_minutes)}`;
+  const params = new URLSearchParams({ limit: "100" });
+  if (el.checksChangesOnly.checked) params.set("changes_only", "1");
+  const checks = await api(`/lines/${line.id}/checks?${params}`);
+  if (generation === state.checksGeneration) renderChecks(checks);
 }
 
 function setHoveredLine(id) {
@@ -442,6 +529,15 @@ function renderLinesTable(lines) {
     pointsTd.textContent = line.points.map((p) => p.price.toFixed(2)).join(" → ");
     tr.appendChild(pointsTd);
 
+    const intervalTd = document.createElement("td");
+    intervalTd.textContent = intervalLabel(line.check_interval_minutes);
+    tr.appendChild(intervalTd);
+
+    const stateTd = document.createElement("td");
+    stateTd.appendChild(stateCell(line.state));
+    if (line.state_since !== null) stateTd.title = `${new Date(line.state_since).toLocaleString()} の足から`;
+    tr.appendChild(stateTd);
+
     const createdTd = document.createElement("td");
     createdTd.textContent = new Date(line.created_at).toLocaleString();
     tr.appendChild(createdTd);
@@ -485,7 +581,7 @@ function deleteSelectedLine() {
 async function createLine(kind, points) {
   await api("/lines", {
     method: "POST",
-    body: JSON.stringify({ symbol: symbol(), kind, points }),
+    body: JSON.stringify({ symbol: symbol(), kind, points, check_interval_minutes: Number(el.checkInterval.value) }),
   });
   await loadLines();
 }
@@ -551,6 +647,13 @@ function wireControls() {
   }
   state.chart.subscribeCrosshairMove(onCrosshairMove);
   el.deleteSelected.addEventListener("click", deleteSelectedLine);
+  const reloadChecks = () =>
+    loadChecks().catch((err) => {
+      console.error(err);
+      el.drawHint.textContent = `判定履歴の読み込みエラー: ${err.message}`;
+    });
+  el.checksChangesOnly.addEventListener("change", reloadChecks);
+  el.checksReload.addEventListener("click", reloadChecks);
   document.addEventListener("keydown", (event) => {
     const target = event.target;
     if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement) return;
@@ -604,6 +707,9 @@ function tickMarkFormatter(time, tickMarkType) {
 }
 
 function init() {
+  // Same timeframe choices as the chart's; the check timeframe is fixed per line once it is created.
+  el.checkInterval.innerHTML = el.interval.innerHTML;
+  el.checkInterval.value = DEFAULT_CHECK_INTERVAL;
   const { createChart, CandlestickSeries, CrosshairMode } = LightweightCharts;
   state.chart = createChart(el.chart, {
     autoSize: true,

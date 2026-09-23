@@ -1,4 +1,4 @@
-import type { ExchangeId } from "shared";
+import { DEFAULT_CHECK_MARGIN_PCT, type ExchangeId } from "shared";
 
 export interface Env {
   DB: D1Database;
@@ -7,25 +7,25 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
 
   EXCHANGE: ExchangeId;
-  CANDLE_INTERVAL_MINUTES: string;
+  DEFAULT_CHECK_INTERVAL_MINUTES: string;
   CANDLE_WINDOW: string;
-  TOUCH_THRESHOLD_PCT: string;
-  MAX_UNDETERMINED_RETRIES: string;
+  CHECK_MARGIN_PCT: string;
   CLAUDE_MODEL: string;
 }
 
-export function candleIntervalMinutes(env: Env): number {
-  return Number(env.CANDLE_INTERVAL_MINUTES) || 1;
+/** Check timeframe for lines created without one, and the default /candles timeframe. */
+export function defaultCheckIntervalMinutes(env: Env): number {
+  return Number(env.DEFAULT_CHECK_INTERVAL_MINUTES) || 15;
 }
 
 export function candleWindow(env: Env): number {
   return Number(env.CANDLE_WINDOW) || 15;
 }
 
-export function touchThresholdPct(env: Env): number {
-  return Number(env.TOUCH_THRESHOLD_PCT) || 0.0005;
+export function checkMarginPct(env: Env): number {
+  return Number(env.CHECK_MARGIN_PCT) || DEFAULT_CHECK_MARGIN_PCT;
 }
 
-export function maxUndeterminedRetries(env: Env): number {
-  return Number(env.MAX_UNDETERMINED_RETRIES) || 8;
+export function claudeModel(env: Env): string {
+  return env.CLAUDE_MODEL || "claude-sonnet-5";
 }

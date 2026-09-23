@@ -1,79 +1,57 @@
-import { getExchangeClient, type Line, type OHLCV, type TouchEvent } from "shared";
-import { insertTouchEvent, listLines, listOpenTouchEvents, updateTouchEvent } from "./db.js";
-import { candleIntervalMinutes, candleWindow, type Env } from "./env.js";
-import { judgeTouchEvent, newlyTouched } from "./judge.js";
+import { getExchangeClient, latestClosedCandleOpen, type Line, type OHLCV } from "shared";
+import { checkLine } from "./check.js";
+import { listLines } from "./db.js";
+import { candleWindow, type Env } from "./env.js";
 
-function groupBySymbol(lines: Line[]): Map<string, Line[]> {
+/** Lines sharing a symbol and check timeframe are served by a single candle fetch. */
+function groupBySymbolAndInterval(lines: Line[]): Map<string, Line[]> {
   const map = new Map<string, Line[]>();
   for (const line of lines) {
-    const list = map.get(line.symbol);
+    const key = `${line.symbol}:${line.check_interval_minutes}`;
+    const list = map.get(key);
     if (list) list.push(line);
-    else map.set(line.symbol, [line]);
+    else map.set(key, [line]);
   }
   return map;
 }
 
-async function processLine(env: Env, line: Line, candles: OHLCV[], currentPrice: number, now: number): Promise<void> {
-  const openEvents = await listOpenTouchEvents(env, line.id);
-
-  if (openEvents.length > 0) {
-    // An existing touch is still being judged (pending) or needs a Cron-cycle
-    // retry (failed, per spec 4.2) — resolve that before considering a new touch.
-    for (const event of openEvents) {
-      const outcome = await judgeTouchEvent(env, line, event, candles);
-      await updateTouchEvent(env, event.id, outcome);
-    }
-    return;
-  }
-
-  if (!newlyTouched(line, currentPrice, now, env)) return;
-
-  const event: TouchEvent = {
-    id: crypto.randomUUID(),
-    line_id: line.id,
-    touched_at: new Date(now).toISOString(),
-    price_at_touch: currentPrice,
-    status: "pending",
-    retry_count: 0,
-    llm_judgment: null,
-    llm_raw_response: [],
-  };
-  await insertTouchEvent(env, event);
-
-  const outcome = await judgeTouchEvent(env, line, event, candles);
-  await updateTouchEvent(env, event.id, outcome);
-}
-
-/** Entry point for the 1-minute Cron Trigger (spec section 4/4.2). */
+/**
+ * Entry point for the 1-minute Cron Trigger. Each line is checked once per closed candle of its own
+ * check_interval_minutes: a line is due when its latest closed candle is newer than the last one it
+ * was checked against, so a missed tick is caught up on the next one.
+ */
 export async function runCronPoll(env: Env): Promise<void> {
   const client = getExchangeClient(env.EXCHANGE);
   const lines = await listLines(env);
   if (lines.length === 0) return;
 
-  const intervalMinutes = candleIntervalMinutes(env);
   const windowSize = candleWindow(env);
   const now = Date.now();
-  const startTime = now - intervalMinutes * 60_000 * windowSize;
 
-  for (const [symbol, symbolLines] of groupBySymbol(lines)) {
-    let candles: OHLCV[];
-    let currentPrice: number;
+  for (const group of groupBySymbolAndInterval(lines).values()) {
+    const { symbol, check_interval_minutes: intervalMinutes } = group[0]!;
+    const target = latestClosedCandleOpen(now, intervalMinutes);
+    const due = group.filter((line) => line.last_checked_candle === null || line.last_checked_candle < target);
+    if (due.length === 0) continue;
+
+    const intervalMs = intervalMinutes * 60_000;
+    let window: OHLCV[];
     try {
-      const [candleData, priceData] = await Promise.all([
-        client.getCandles(symbol, intervalMinutes, startTime, now),
-        client.getCurrentPrice(symbol),
-      ]);
-      candles = candleData;
-      currentPrice = priceData.price;
+      const candles = await client.getCandles(symbol, intervalMinutes, target - intervalMs * windowSize, now);
+      // Drop the still-forming candle so the LLM only ever sees closed ones.
+      window = candles
+        .filter((c) => c.timestamp <= target)
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .slice(-windowSize);
     } catch {
-      // Whole symbol batch failed (rate limit, network) — the next Cron tick
-      // retries naturally, per spec 4.2's "let the next cycle be the retry".
+      // Rate limit / network — the next Cron tick retries naturally (spec 4.2).
       continue;
     }
-    if (candles.length === 0) continue;
+    // The exchange hasn't published the just-closed candle yet; try again next tick.
+    if (window.at(-1)?.timestamp !== target) continue;
 
-    for (const line of symbolLines) {
-      await processLine(env, line, candles, currentPrice, now);
+    for (const line of due) {
+      await checkLine(env, line, window);
     }
   }
 }

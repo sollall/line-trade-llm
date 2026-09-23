@@ -1,19 +1,19 @@
 # line-trade-llm
 
-自分でチャートに引いたライン(水平線・トレンドライン)に価格がタッチした際、直近のOHLCVをLLM(Claude)に読ませて「明確に割ったか / ヒゲで否定されて戻ってきているだけか」を判定させ、その判定ロジックをバックテストで検証するための実装です。仕様は元の仕様書(v0.2)に準拠しています。v0.2時点では自動発注は対象外で、判定ロジックの有効性検証が目的です。
+自分でチャートに引いたライン(水平線・トレンドライン)について、ラインごとに選んだ時間足が確定するたびに直近のOHLCVをLLM(Claude)に読ませ、「上で維持 / 下で維持 / 試している最中 / 上抜け確定 / 下抜け確定」のどの状態かを判定させ、その判定ロジックをバックテストで検証するための実装です。仕様は元の仕様書(v0.2)に準拠しています。v0.2時点では自動発注は対象外で、判定ロジックの有効性検証が目的です。
 
 ## 構成
 
 ```
 line-trade-llm/
-  shared/     touch/LLM/exchange クライアントなど、Worker(本番)とbacktest(オフライン再生)の両方が
+  shared/     ライン計算/LLM/exchange クライアントなど、Worker(本番)とbacktest(オフライン再生)の両方が
               同じロジックで動くよう共有するTypeScriptコード
-  worker/     Cloudflare Workers本体。POST/GET/DELETE /lines, GET /candles, 1分間隔のCron Trigger
-  backtest/   過去データに対してタッチ検知→LLM判定→仮想売買を再生し、勝率等を集計するCLI
+  worker/     Cloudflare Workers本体。POST/GET/DELETE /lines, GET /lines/{id}/checks, GET /candles, 1分間隔のCron Trigger
+  backtest/   過去データに対して定期判定→状態遷移→仮想売買を再生し、勝率等を集計するCLI
   frontend/   TradingView Lightweight Charts(CDN読込)によるライン描画UI。静的ファイルなのでどこでもホスト可能
 ```
 
-`shared/` にタッチ判定(`touch.ts`)・LLMプロンプト構築とClaude呼び出し(`llm/`)・取引所クライアント(`exchanges/`)をまとめてあるのは、**本番のCron判定とバックテストの再生が完全に同じロジックで動く**ことを保証するためです。バックテストの結果が本番の挙動をそのまま予測できないと検証の意味がありません。
+`shared/` にライン計算(`line.ts`)・LLMプロンプト構築とClaude呼び出し(`llm/`)・取引所クライアント(`exchanges/`)をまとめてあるのは、**本番のCron判定とバックテストの再生が完全に同じロジックで動く**ことを保証するためです。バックテストの結果が本番の挙動をそのまま予測できないと検証の意味がありません。
 
 ## セットアップ
 
@@ -33,6 +33,12 @@ npx wrangler secret put ANTHROPIC_API_KEY   # Claude APIキー
 npm run db:migrate:remote                   # schema.sql をD1に適用(ローカル開発時は db:migrate:local)
 ```
 
+タッチ判定版(`touch_events` テーブルがある旧スキーマ)のD1を使っている場合は、代わりに移行用SQLを1回だけ流してください。`lines` に判定足・状態の列を追加し、`line_checks` を作成します。旧方式の判定結果である `touch_events` は削除されます(ライン削除を外部キーでブロックしてしまうため)。
+
+```bash
+npm run db:migrate:periodic:remote          # ローカルは db:migrate:periodic:local
+```
+
 #### APIトークンの権限設定
 
 - `ANTHROPIC_API_KEY`: [Anthropic Console](https://console.anthropic.com/settings/keys) で発行するキーです。このWorkerが使うのはMessages API(判定リクエスト)のみで、Admin API(組織設定・メンバー管理・他キーの発行/失効など)の権限は不要です。Cron Triggerから自動的に呼び出され続ける常駐シークレットになるため、可能であれば他のプロジェクトと共有せず本プロジェクト専用のWorkspaceを作成してキーを発行し、Workspace側で使用量上限(spend limit)を設定しておくことを推奨します。漏洩時の影響範囲を絞るためです。
@@ -43,10 +49,9 @@ npm run db:migrate:remote                   # schema.sql をD1に適用(ロー�
 | 変数 | 意味 | デフォルト |
 |---|---|---|
 | `EXCHANGE` | 価格取得元。`hyperliquid` \| `backpack` | `hyperliquid` |
-| `CANDLE_INTERVAL_MINUTES` | ローソク足の間隔(分) | `1` |
-| `CANDLE_WINDOW` | LLMに渡す直近本数 | `15` |
-| `TOUCH_THRESHOLD_PCT` | タッチとみなす価格との相対距離(未決事項、要チューニング) | `0.0005` |
-| `MAX_UNDETERMINED_RETRIES` | `undetermined`の再判定上限(未決事項、要チューニング) | `8` |
+| `DEFAULT_CHECK_INTERVAL_MINUTES` | 判定足を指定せずに作成したラインの判定足(分)。`GET /candles` の既定の時間足も兼ねる | `15` |
+| `CANDLE_WINDOW` | LLMに渡す直近の確定足の本数 | `15` |
+| `CHECK_MARGIN_PCT` | 直近足の安値〜高値の範囲をこの割合だけ広げた範囲にラインが入っていなければ、LLMを呼ばずにスキップ(要チューニング) | `0.002` |
 | `CLAUDE_MODEL` | 判定に使うClaudeモデル | `claude-sonnet-5` |
 
 ### 2. Workerの起動・デプロイ
@@ -61,27 +66,48 @@ npm run deploy:worker   # 本番デプロイ
 `frontend/` はビルド不要の静的ファイル(`index.html` / `app.js` / `style.css`)です。`npx serve frontend` 等で配信するか、Cloudflare Pages 等にそのまま置いてください。画面上部の「API Base」にWorkerのURLを入力すれば動作します。
 
 - [TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts)(Apache-2.0, CDN/jsdelivr)でローソク足を表示(データはWorkerの `GET /candles` 経由で取引所から取得)。ライセンス上の帰属表示としてチャート左下のTradingViewロゴ(`attributionLogo`)は有効のままにしています
-- Lightweight Chartsには描画ツールが無いため、水平線は `createPriceLine`、トレンドラインは自前のSeries Primitive(`frontend/app.js` の `TrendLinesPrimitive`)で描画しています。トレンドラインはタッチ判定(`shared/src/touch.ts` の `lineValueAt`)と同じく2点を通る直線として両方向に延長して表示します
-- 「時間足」で表示する足(1分〜日足)を切り替えられます。これは表示用で、Cron判定に使う足は `CANDLE_INTERVAL_MINUTES` のままです。ラインは時刻と価格で保存しているので、どの時間足で引いても同じラインとして扱われます
+- Lightweight Chartsには描画ツールが無いため、水平線は `createPriceLine`、トレンドラインは自前のSeries Primitive(`frontend/app.js` の `TrendLinesPrimitive`)で描画しています。トレンドラインは判定(`shared/src/line.ts` の `lineValueAt`)と同じく2点を通る直線として両方向に延長して表示します
+- 「時間足」で表示する足(1分〜日足)を切り替えられます。これは表示用で、判定に使う足はライン作成時に「判定足」で選んだものです(作成後は変更不可)。ラインは時刻と価格で保存しているので、どの時間足で引いても同じラインとして扱われます
 - 初回は直近1000本を読み込み、チャートを左端近くまでスクロールすると更に1000本ずつ過去を読み込みます。取引所が返せる範囲が上限で、Hyperliquidは時間足ごとに直近5000本までしか返さないため、1分足なら約3.5日、15分足なら約52日、日足なら約13年が遡れる目安です
 - 「水平線」ボタン→チャートを1クリックで水平線を保存、「トレンドライン」ボタン→2クリックで保存
+- 描画前に「判定足」(1分〜日足、既定15分)を選んでおくと、そのラインはその時間足が確定するたびに判定されます
+- 登録済みラインの一覧に判定足と現在の状態を表示。行を選択すると下に「判定履歴」(判定した足・状態・確信度・理由、LLMに送ったプロンプト全文)が出ます。「状態が変わった判定だけ表示」で絞り込めます
 - 登録済みラインの一覧・削除。描画モードが「なし」のときにチャート上のラインをクリック(または一覧の行をクリック)すると選択状態になり、「選択中のラインを削除」ボタンかDeleteキーで削除できます(Escで選択解除)。カーソルを乗せたラインと、一覧でマウスを乗せた行のラインは太く強調表示されます
 
 ## API
 
 | エンドポイント | 説明 |
 |---|---|
-| `POST /lines` | ライン登録。body: `{ symbol, kind: "horizontal"\|"trend", points: {price,timestamp}[] }` |
-| `GET /lines?symbol=` | ライン一覧取得 |
+| `POST /lines` | ライン登録。body: `{ symbol, kind: "horizontal"\|"trend", points: {price,timestamp}[], check_interval_minutes? }`。`check_interval_minutes` は判定足(分、1,3,5,15,30,60,120,240,480,720,1440)で、省略時は `DEFAULT_CHECK_INTERVAL_MINUTES` |
+| `GET /lines?symbol=` | ライン一覧取得。各ラインに現在の `state` / `state_since`(その状態になった足の時刻) / `last_checked_candle` を含む |
+| `GET /lines/{id}/checks?limit=&changes_only=1` | ラインの判定履歴(新しい順、既定100件・最大1000件)。各判定に送ったプロンプト全文・状態・確信度・理由を含む。`changes_only=1` で状態が変わった判定のみ |
 | `DELETE /lines/{id}` | ライン削除 |
-| `GET /candles?symbol=&interval=&limit=&endTime=` | チャート表示用のOHLCV取得(取引所へのプロキシ)。`interval`は分(1,3,5,15,30,60,120,240,480,720,1440、省略時は`CANDLE_INTERVAL_MINUTES`)、`limit`は`endTime`(epoch ms、省略時は現在)以前の本数で最大5000。取引所の1リクエストあたりの上限を超える分はページングして取得 |
+| `GET /candles?symbol=&interval=&limit=&endTime=` | チャート表示用のOHLCV取得(取引所へのプロキシ)。`interval`は分(1,3,5,15,30,60,120,240,480,720,1440、省略時は`DEFAULT_CHECK_INTERVAL_MINUTES`)、`limit`は`endTime`(epoch ms、省略時は現在)以前の本数で最大5000。取引所の1リクエストあたりの上限を超える分はページングして取得 |
 
-Cron Trigger(1分間隔)が全ラインを銘柄ごとにまとめて価格・ローソク足を取得し、タッチ検知→(タッチ済みなら)LLM判定を行い、`touch_events` に記録します。判定が`undetermined`の場合は次のCronサイクルで再判定します(仕様6.4)。API/LLM呼び出しの失敗は`status: failed`として次のCronに委ねます(仕様4.2)。
+### 定期判定の流れ
+
+Cron Trigger は1分ごとに動きますが、各ラインを判定するのは**そのラインの判定足が確定したとき**だけです。
+
+1. ラインを「銘柄×判定足」でまとめ、最新の確定足がまだ判定されていないラインがあるグループだけ、取引所から直近 `CANDLE_WINDOW` 本の確定足を取得します(形成中の足は除外。取引所がまだ確定足を返さなければ次の分に再試行)
+2. ラインが直近足の安値〜高値(±`CHECK_MARGIN_PCT`)の範囲から外れていれば、LLMを呼ばずにその足を判定済みにします
+3. 範囲内なら、直近足と**前回の状態・理由**を渡してLLMに状態を判定させ、`line_checks` に(送ったプロンプトごと)記録し、`lines` の現在の状態を更新します
+
+| 状態 | 意味 |
+|---|---|
+| `holding_above` | 上で維持(ラインより上、またはサポートとして機能) |
+| `holding_below` | 下で維持(ラインより下、またはレジスタンスとして機能) |
+| `testing` | 試している最中(ライン付近で攻防中) |
+| `broken_up` | 上抜け確定(抜けが確定した足でのみ報告。以降も上で推移すれば `holding_above` に戻る) |
+| `broken_down` | 下抜け確定(同上、以降は `holding_below`) |
+
+LLM呼び出しは1回の判定につき最大3回(初回+2回リトライ)まで試し、それでも失敗した場合は何も記録せず、次の分のCronが同じ足を再判定します(仕様4.2)。Cronが一度止まっても、次に動いたときに最新の確定足で判定し直します。
+
+呼び出し回数の目安は「判定足1本につき、価格の近くにあるライン1本あたり1回」です(例: 15分足で常に価格の近くにあるライン1本なら1日最大96回)。同じラインの同じ足の判定はKVにキャッシュし、Cronが同じ足をやり直しても再課金しません(仕様8)。
 
 ## バックテスト
 
 ```bash
-# lines.json は GET /lines のレスポンスをそのまま保存したもの
+# lines.json は GET /lines のレスポンスをそのまま保存したもの(各ラインの check_interval_minutes の足で再生)
 curl "http://localhost:8787/lines?symbol=BTC" > lines.json
 
 npm run backtest -- \
@@ -94,7 +120,7 @@ npm run backtest -- \
 
 - `backtest_result.json` — `win_rate` / `profit_factor` / `max_drawdown` / `total_trades`(仕様5.3)
 - `trades.json` — 仮想売買ごとの詳細(方向・エントリー/エグジット・R倍数)
-- `touch_log.json` — タッチイベントごとのLLM判定履歴(何本待って確定したか含む)
+- `check_log.json` — 足ごとの判定履歴(状態・前回の状態・理由・送ったプロンプト)
 
 全オプションは `npm run backtest -- --help` 相当で `npm run backtest --` を引数なしで実行すると表示されます。
 
@@ -102,7 +128,7 @@ npm run backtest -- \
 
 仕様書は判定ロジック(3値分類)までを定義しており、判定後の具体的なエントリー/エグジットルールは範囲外です(仕様9の未決事項)。バックテストでは以下の暫定ルールで仮想売買しています(`backtest/src/replay.ts`):
 
-- `break_confirmed` でエントリー(レジスタンス上抜け→ロング、サポート下抜け→ショート)
+- 状態が `broken_up` に変わった足の終値でロング、`broken_down` に変わった足の終値でショート(同じラインの前のトレードが決済されるまでは新規エントリーしない)
 - ストップロス = 割れたライン自体の値、テイクプロフィット = リスクの `--rr` 倍(デフォルト2倍)
 - `--max-hold-bars` を超えても未決着ならその足の終値で手仕舞い
 
@@ -110,14 +136,15 @@ npm run backtest -- \
 
 ## 判定(LLM)の入出力
 
-`shared/src/llm/prompt.ts` / `shared/src/llm/client.ts` を参照。Claude APIを `tool_choice` で `report_judgment` ツール呼び出しに強制し、構造化JSON `{decision, confidence, reasoning}` を取得します(仕様6.3)。同一ライン・近い価格帯・近い時間帯の判定はKVにキャッシュし重複課金を防ぎます(仕様8)。
+`shared/src/llm/prompt.ts` / `shared/src/llm/client.ts` を参照。システムプロンプト(固定)と、銘柄・判定足・ラインの値・直近の確定足(トレンドラインは足ごとのラインの値つき)・出来高比・前回の状態と理由をまとめたユーザーメッセージを送り、`tool_choice` で `report_line_state` ツール呼び出しに強制して、構造化JSON `{state, confidence, reasoning}` を取得します(仕様6.3)。実際に送ったユーザーメッセージは判定ごとに `line_checks.prompt` に保存され、`GET /lines/{id}/checks` とフロントの判定履歴で確認できます。
 
 ## 実装済み範囲 / 今後の検討課題(仕様9より)
 
 以下は仕様書に「未決事項」として明記されている、または実装上の仮決め箇所です。動くものを優先して妥当な初期値を入れていますが、実運用前に検証・調整してください:
 
-- タッチ判定閾値(`TOUCH_THRESHOLD_PCT`)・`undetermined`リトライ上限(`MAX_UNDETERMINED_RETRIES`)は暫定値
-- トレンドラインは2点から時刻方向に無限延長する「半直線/直線」として扱っています(区間=segmentとして打ち切る運用にしたい場合は `shared/src/touch.ts` の `lineValueAt` を要修正)
+- 判定対象を絞る範囲(`CHECK_MARGIN_PCT`)・LLMに渡す本数(`CANDLE_WINDOW`)は暫定値
+- `line_checks` は判定のたびに1行(プロンプト全文込み)増えます。1分足のラインを長期間置くと行数が増えるので、必要に応じて古い行を削除してください
+- トレンドラインは2点から時刻方向に無限延長する「半直線/直線」として扱っています(区間=segmentとして打ち切る運用にしたい場合は `shared/src/line.ts` の `lineValueAt` を要修正)
 - LLM入力はテキスト(案A)のみ実装。画像入力(案B)は未実装
 - バックテストの手数料・スリッページは未考慮(`pnl_pct`は無レバレッジの価格変化率のみ)
 - v0.3以降のアラート通知・自動発注は対象外(仕様2.2)
@@ -126,5 +153,6 @@ npm run backtest -- \
 
 - 3ワークスペース(`shared`/`worker`/`backtest`)すべて `npm run typecheck` 通過
 - `wrangler deploy --dry-run` でWorkerのバンドル(shared依存込み)を確認済み
-- `backtest` はモックLLMでの合成データ再生(タッチ検知→判定ループ→仮想売買→指標集計)まで動作確認済み
+- `backtest` はモックLLMでの合成データ再生(定期判定→状態遷移→仮想売買→指標集計)まで動作確認済み
+- Cronの定期判定は、インメモリのSQLiteと取引所・Claude APIのスタブで通しの動作確認済み(確定足ごとに1回だけ判定・形成中の足の除外・遠いラインのスキップ・前回状態のプロンプトへの反映・ライン削除時の履歴削除)
 - Claude実呼び出し・実取引所APIでの通しは未実施(APIキー・実データが必要なため)。デプロイ前に `--llm claude` で少量期間のバックテストを行うことを推奨します

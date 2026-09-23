@@ -37,6 +37,7 @@
     <button id="modeHorizontal" data-mode="horizontal">水平線 (1クリック)</button>
     <button id="modeTrend" data-mode="trend">トレンドライン (2クリック)</button>
     <button id="modeNone" data-mode="none" class="active">なし</button>
+    <label title="この時間足が確定するたびにLLMがラインの状態を判定します">判定足 <select id="checkInterval"></select></label>
     <button id="deleteSelected" class="danger" hidden>選択中のラインを削除</button>
     <span id="drawHint"></span>
   </div>
@@ -51,12 +52,35 @@
           <th>種別</th>
           <th>Symbol</th>
           <th>ポイント</th>
+          <th>判定足</th>
+          <th>状態</th>
           <th>作成日時</th>
           <th></th>
         </tr>
       </thead>
       <tbody></tbody>
     </table>
+  </section>
+
+  <section id="checksSection" hidden>
+    <h2>判定履歴 <span id="checksLineLabel"></span></h2>
+    <div class="checks-controls">
+      <label><input id="checksChangesOnly" type="checkbox" /> 状態が変わった判定だけ表示</label>
+      <button id="checksReload">更新</button>
+    </div>
+    <table id="checksTable">
+      <thead>
+        <tr>
+          <th>足(確定)</th>
+          <th>状態</th>
+          <th>確信度</th>
+          <th>理由</th>
+          <th>送信したプロンプト</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="checksEmpty" class="muted" hidden>まだ判定がありません(価格がラインの近くにあるときだけ判定します)</p>
   </section>
 
   <script src="./app.js"></script>

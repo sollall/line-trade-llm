@@ -1,52 +1,23 @@
 import {
-  callClaudeJudge,
-  checkTouch,
-  inferDirection,
+  buildLineCheckPrompt,
+  callClaudeLineCheck,
+  isLineNearCandles,
   lineValueAt,
+  volumeRatioVsAverage,
   type Line,
-  type LlmJudgmentAttempt,
-  type LlmJudgmentResult,
+  type LineCheckContext,
+  type LineCheckResult,
+  type LineState,
   type OHLCV,
 } from "shared";
 import { mockJudge } from "./mockJudge.js";
-import type { ReplayConfig, ReplayOutput, ReplayTouchLog, SimulatedTrade, TradeDirection } from "./types.js";
+import type { ReplayCheckLog, ReplayConfig, ReplayOutput, SimulatedTrade, TradeDirection } from "./types.js";
 
-interface OpenEvent {
-  touched_at: number;
-  price_at_touch: number;
-  retry_count: number;
-  attempts: LlmJudgmentAttempt[];
-}
-
-async function judge(
-  config: ReplayConfig,
-  line: Line,
-  candles: OHLCV[],
-  lineValue: number,
-  retryAttempt: number,
-  priorTouchCount: number,
-  priorRejectCount: number,
-): Promise<LlmJudgmentResult> {
-  const latest = candles[candles.length - 1]!;
-  const avgVolume = candles.reduce((sum, c) => sum + c.volume, 0) / candles.length;
-  const direction = inferDirection(line, lineValue, candles[0]!.close);
-
-  const context = {
-    symbol: line.symbol,
-    line,
-    lineValue,
-    direction,
-    candles,
-    priorTouchCount,
-    priorRejectCount,
-    volumeRatioVsAverage: avgVolume ? latest.volume / avgVolume : 1,
-    retryAttempt,
-  };
-
+async function judge(config: ReplayConfig, context: LineCheckContext, prompt: string): Promise<LineCheckResult> {
   if (config.llmMode === "mock") return mockJudge(context);
 
   if (!config.claudeApiKey) throw new Error("--llm=claude requires --claude-api-key (or ANTHROPIC_API_KEY env var)");
-  return callClaudeJudge({ apiKey: config.claudeApiKey, model: config.claudeModel, context });
+  return callClaudeLineCheck({ apiKey: config.claudeApiKey, model: config.claudeModel, prompt });
 }
 
 function simulateTradeExit(
@@ -74,116 +45,85 @@ function simulateTradeExit(
 }
 
 /**
- * Replays a symbol's candle history against its saved lines, running the
- * exact same touch-detection + LLM-judgment logic the live Worker cron uses
- * (spec section 4/6), then simulates a trade for every break_confirmed
- * decision to produce the win_rate/profit_factor/max_drawdown inputs
- * (spec 5.3).
+ * Replays one line against the candle history of its check_interval_minutes, running the same
+ * periodic check the live Worker cron does on every closed candle (skip when price is far from the
+ * line, otherwise ask the LLM for the line's state with the previous state as context), then
+ * simulates a trade whenever the state changes to broken_up / broken_down.
  *
  * Trade rule (not specified by the spec — v0.2 leaves execution/exit design
  * open, see spec section 9): enter in the breakout direction at the
  * confirming candle's close, stop-loss at the broken line's value, take
  * profit at `riskRewardRatio` x that risk, exit at max_hold bars otherwise.
+ * No new trade is opened on a line while its previous trade is still open.
  */
-export async function replaySymbol(config: ReplayConfig, lines: Line[], candles: OHLCV[]): Promise<ReplayOutput> {
-  if (candles.length === 0) {
-    return { period_start: 0, period_end: 0, trades: [], touchLog: [] };
-  }
-
-  const openEvents = new Map<string, OpenEvent>();
-  const resolvedCounts = new Map<string, { touchCount: number; rejectCount: number }>();
+export async function replayLine(config: ReplayConfig, line: Line, candles: OHLCV[]): Promise<ReplayOutput> {
   const trades: SimulatedTrade[] = [];
-  const touchLog: ReplayTouchLog[] = [];
+  const checkLog: ReplayCheckLog[] = [];
+
+  let state: LineState | null = null;
+  let stateSince: number | null = null;
+  let lastReasoning = "";
+  let openTradeUntilIndex = -1;
 
   for (let i = 0; i < candles.length; i++) {
-    const windowStart = Math.max(0, i - config.candleWindow + 1);
-    const window = candles.slice(windowStart, i + 1);
+    const window = candles.slice(Math.max(0, i - config.candleWindow + 1), i + 1);
     const current = candles[i]!;
+    if (!isLineNearCandles(line, window, config.checkMarginPct)) continue;
 
-    for (const line of lines) {
-      const history = resolvedCounts.get(line.id) ?? { touchCount: 0, rejectCount: 0 };
-      let open = openEvents.get(line.id);
+    const context: LineCheckContext = {
+      symbol: line.symbol,
+      line,
+      intervalMinutes: line.check_interval_minutes,
+      candles: window,
+      volumeRatioVsAverage: volumeRatioVsAverage(window),
+      previous: state && stateSince !== null ? { state, since: stateSince, reasoning: lastReasoning } : null,
+    };
+    const prompt = buildLineCheckPrompt(context);
+    const result = await judge(config, context, prompt);
 
-      if (!open) {
-        const check = checkTouch(line, current.close, current.timestamp, { thresholdPct: config.touchThresholdPct });
-        if (!check?.touched) continue;
-        open = { touched_at: current.timestamp, price_at_touch: current.close, retry_count: 0, attempts: [] };
-        openEvents.set(line.id, open);
-      }
+    const changed = result.state !== state;
+    checkLog.push({
+      line_id: line.id,
+      candle_timestamp: current.timestamp,
+      state: result.state,
+      previous_state: state,
+      state_changed: changed,
+      confidence: result.confidence,
+      reasoning: result.reasoning,
+      prompt,
+    });
+    if (changed) stateSince = current.timestamp;
+    state = result.state;
+    lastReasoning = result.reasoning;
 
-      const lineValue = lineValueAt(line, current.timestamp) ?? current.close;
-      const result = await judge(config, line, window, lineValue, open.retry_count, history.touchCount, history.rejectCount);
-      open.attempts.push({
-        attempted_at: new Date(current.timestamp).toISOString(),
-        candle_count: window.length,
-        result,
-        from_cache: false,
-      });
+    if (!changed || (result.state !== "broken_up" && result.state !== "broken_down")) continue;
+    if (i <= openTradeUntilIndex) continue;
 
-      if (result.decision === "undetermined") {
-        open.retry_count += 1;
-        if (open.retry_count <= config.maxUndeterminedRetries) continue; // keep waiting for the next candle
+    const lineValue = lineValueAt(line, current.timestamp);
+    if (lineValue === null) continue;
+    const direction: TradeDirection = result.state === "broken_up" ? "long" : "short";
+    const entryPrice = current.close;
+    const stopLoss = lineValue;
+    const risk = Math.abs(entryPrice - stopLoss);
+    const takeProfit = direction === "long" ? entryPrice + risk * config.riskRewardRatio : entryPrice - risk * config.riskRewardRatio;
 
-        // timed out -> treated as hold_reject-equivalent (spec 6.4 point 4)
-        openEvents.delete(line.id);
-        resolvedCounts.set(line.id, { touchCount: history.touchCount + 1, rejectCount: history.rejectCount + 1 });
-        touchLog.push({
-          line_id: line.id,
-          touched_at: open.touched_at,
-          resolved_status: "timeout",
-          decision: "undetermined",
-          bars_to_resolve: open.retry_count,
-          attempts: open.attempts,
-        });
-        continue;
-      }
+    const exit = simulateTradeExit(candles, i, direction, entryPrice, stopLoss, takeProfit, config.maxHoldBars);
+    const pnlRaw = direction === "long" ? exit.exitPrice - entryPrice : entryPrice - exit.exitPrice;
+    openTradeUntilIndex = exit.exitIndex;
 
-      openEvents.delete(line.id);
-      const resolvedStatus = result.decision === "break_confirmed" ? "confirmed" : "rejected";
-      resolvedCounts.set(line.id, {
-        touchCount: history.touchCount + 1,
-        rejectCount: history.rejectCount + (resolvedStatus === "rejected" ? 1 : 0),
-      });
-      touchLog.push({
-        line_id: line.id,
-        touched_at: open.touched_at,
-        resolved_status: resolvedStatus,
-        decision: result.decision,
-        bars_to_resolve: open.retry_count,
-        attempts: open.attempts,
-      });
-
-      if (result.decision !== "break_confirmed") continue;
-
-      const direction: TradeDirection = inferDirection(line, lineValue, window[0]!.close) === "resistance" ? "long" : "short";
-      const entryPrice = current.close;
-      const stopLoss = lineValue;
-      const risk = Math.abs(entryPrice - stopLoss);
-      const takeProfit = direction === "long" ? entryPrice + risk * config.riskRewardRatio : entryPrice - risk * config.riskRewardRatio;
-
-      const exit = simulateTradeExit(candles, i, direction, entryPrice, stopLoss, takeProfit, config.maxHoldBars);
-      const pnlRaw = direction === "long" ? exit.exitPrice - entryPrice : entryPrice - exit.exitPrice;
-
-      trades.push({
-        line_id: line.id,
-        direction,
-        entry_time: current.timestamp,
-        entry_price: entryPrice,
-        stop_loss: stopLoss,
-        take_profit: takeProfit,
-        exit_time: candles[exit.exitIndex]!.timestamp,
-        exit_price: exit.exitPrice,
-        exit_reason: exit.reason,
-        pnl_pct: pnlRaw / entryPrice,
-        bars_to_resolve: open.retry_count,
-      });
-    }
+    trades.push({
+      line_id: line.id,
+      direction,
+      entry_time: current.timestamp,
+      entry_price: entryPrice,
+      stop_loss: stopLoss,
+      take_profit: takeProfit,
+      exit_time: candles[exit.exitIndex]!.timestamp,
+      exit_price: exit.exitPrice,
+      exit_reason: exit.reason,
+      pnl_pct: pnlRaw / entryPrice,
+    });
   }
 
-  return {
-    period_start: candles[0]!.timestamp,
-    period_end: candles[candles.length - 1]!.timestamp,
-    trades,
-    touchLog,
-  };
+  return { trades, checkLog };
 }
