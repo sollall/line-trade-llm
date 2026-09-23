@@ -10,7 +10,7 @@ line-trade-llm/
               同じロジックで動くよう共有するTypeScriptコード
   worker/     Cloudflare Workers本体。POST/GET/DELETE /lines, GET /candles, 1分間隔のCron Trigger
   backtest/   過去データに対してタッチ検知→LLM判定→仮想売買を再生し、勝率等を集計するCLI
-  frontend/   KLineCharts(CDN読込)によるライン描画UI。静的ファイルなのでどこでもホスト可能
+  frontend/   TradingView Lightweight Charts(CDN読込)によるライン描画UI。静的ファイルなのでどこでもホスト可能
 ```
 
 `shared/` にタッチ判定(`touch.ts`)・LLMプロンプト構築とClaude呼び出し(`llm/`)・取引所クライアント(`exchanges/`)をまとめてあるのは、**本番のCron判定とバックテストの再生が完全に同じロジックで動く**ことを保証するためです。バックテストの結果が本番の挙動をそのまま予測できないと検証の意味がありません。
@@ -60,7 +60,8 @@ npm run deploy:worker   # 本番デプロイ
 
 `frontend/` はビルド不要の静的ファイル(`index.html` / `app.js` / `style.css`)です。`npx serve frontend` 等で配信するか、Cloudflare Pages 等にそのまま置いてください。画面上部の「API Base」にWorkerのURLを入力すれば動作します。
 
-- KLineCharts(CDN, jsdelivr)でローソク足を表示(データはWorkerの `GET /candles` 経由で取引所から取得)
+- [TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts)(Apache-2.0, CDN/jsdelivr)でローソク足を表示(データはWorkerの `GET /candles` 経由で取引所から取得)。ライセンス上の帰属表示としてチャート右下のTradingViewロゴ(`attributionLogo`)は有効のままにしています
+- Lightweight Chartsには描画ツールが無いため、水平線は `createPriceLine`、トレンドラインは自前のSeries Primitive(`frontend/app.js` の `TrendLinesPrimitive`)で描画しています。トレンドラインはタッチ判定(`shared/src/touch.ts` の `lineValueAt`)と同じく2点を通る直線として両方向に延長して表示します
 - 「水平線」ボタン→チャートを1クリックで水平線を保存、「トレンドライン」ボタン→2クリックで保存
 - 登録済みラインの一覧・削除
 
