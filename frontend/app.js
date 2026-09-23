@@ -11,11 +11,18 @@ const state = {
   historyExhausted: false, // the exchange returned nothing older
   drawMode: "none", // "none" | "horizontal" | "trend"
   pendingPoints: [], // collected {price, timestamp} while drawing a trend line
-  priceLines: [], // IPriceLine handles for horizontal lines
-  savedTrendLines: [], // trend lines from the API, redrawn together with the drawing preview
+  lines: [], // lines of the current symbol, as returned by GET /lines
+  priceLineById: new Map(), // line id -> IPriceLine for horizontal lines
+  previewPoints: null, // [p0, cursor] while placing the 2nd trend line point
+  selectedLineId: null,
+  hoveredLineId: null, // under the cursor on the chart, or its row in the table
 };
 
 const LINE_COLOR = "#f0b429";
+const SELECTED_COLOR = "#4dd0e1";
+const PREVIEW_COLOR = "#4d76e8";
+// How close (px) the cursor must be to a line to hover/select it.
+const HIT_TOLERANCE_PX = 6;
 const CANDLES_PER_PAGE = 1000;
 // Start fetching older candles when the view gets within this many bars of the oldest loaded one.
 const LOAD_OLDER_THRESHOLD_BARS = 50;
@@ -29,6 +36,7 @@ const el = {
   drawHint: document.getElementById("drawHint"),
   linesTableBody: document.querySelector("#linesTable tbody"),
   modeButtons: document.querySelectorAll(".draw-controls button[data-mode]"),
+  deleteSelected: document.getElementById("deleteSelected"),
 };
 
 function apiBase() {
@@ -59,7 +67,11 @@ async function api(path, options) {
 function setMode(mode) {
   state.drawMode = mode;
   state.pendingPoints = [];
-  if (state.trendLines) renderTrendLines(state.savedTrendLines);
+  state.previewPoints = null;
+  state.selectedLineId = null;
+  state.hoveredLineId = null;
+  el.chart.style.cursor = "";
+  if (state.trendLines) refreshLineStyles();
   for (const btn of el.modeButtons) {
     btn.classList.toggle("active", btn.dataset.mode === mode);
   }
@@ -121,9 +133,9 @@ class TrendLinesPaneRenderer {
   draw(target) {
     target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
       ctx.save();
-      ctx.lineWidth = 1.5;
       for (const seg of this.segments) {
         ctx.strokeStyle = seg.color;
+        ctx.lineWidth = seg.width;
         ctx.setLineDash(seg.dashed ? [6, 4] : []);
         const slope = (seg.y2 - seg.y1) / (seg.x2 - seg.x1);
         ctx.beginPath();
@@ -153,6 +165,15 @@ function logicalToX(timeScale, logical) {
   return x0 + (logical - base) * (x1 - x0);
 }
 
+// {price, timestamp} -> [x, y] in pane coordinates (x may lie outside the visible area).
+function pricePointToXY(p) {
+  const logical = timestampToLogical(p.timestamp);
+  if (logical === null) return null;
+  const x = logicalToX(state.chart.timeScale(), logical);
+  const y = state.series.priceToCoordinate(p.price);
+  return x === null || y === null ? null : [x, y];
+}
+
 class TrendLinesPaneView {
   constructor(source) {
     this.source = source;
@@ -160,23 +181,13 @@ class TrendLinesPaneView {
   }
 
   update() {
-    const { chart, series } = this.source;
-    if (!chart || !series) return;
-    const timeScale = chart.timeScale();
-    const toXY = (p) => {
-      const logical = timestampToLogical(p.timestamp);
-      if (logical === null) return null;
-      const x = logicalToX(timeScale, logical);
-      const y = series.priceToCoordinate(p.price);
-      return x === null || y === null ? null : [x, y];
-    };
-
+    if (!this.source.chart || !this.source.series) return;
     this.segments = [];
     for (const line of this.source.lines) {
-      const a = toXY(line.points[0]);
-      const b = toXY(line.points[1]);
+      const a = pricePointToXY(line.points[0]);
+      const b = pricePointToXY(line.points[1]);
       if (!a || !b || a[0] === b[0]) continue;
-      this.segments.push({ x1: a[0], y1: a[1], x2: b[0], y2: b[1], color: line.color, dashed: line.dashed });
+      this.segments.push({ x1: a[0], y1: a[1], x2: b[0], y2: b[1], color: line.color, width: line.width, dashed: line.dashed });
     }
   }
 
@@ -187,7 +198,7 @@ class TrendLinesPaneView {
 
 class TrendLinesPrimitive {
   constructor() {
-    this.lines = []; // { points: [{price, timestamp}, {price, timestamp}], color, dashed }
+    this.lines = []; // { points: [{price, timestamp}, {price, timestamp}], color, width, dashed }
     this.chart = null;
     this.series = null;
     this.requestUpdate = null;
@@ -292,40 +303,132 @@ function onVisibleLogicalRangeChange(range) {
 }
 
 function renderLinesOnChart(lines) {
-  for (const priceLine of state.priceLines) state.series.removePriceLine(priceLine);
-  state.priceLines = lines
-    .filter((line) => line.kind === "horizontal")
-    .map((line) =>
-      state.series.createPriceLine({
-        price: line.points[0].price,
-        color: LINE_COLOR,
-        lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Solid,
-        axisLabelVisible: true,
-      }),
-    );
-  renderTrendLines(lines.filter((line) => line.kind === "trend"));
+  for (const priceLine of state.priceLineById.values()) state.series.removePriceLine(priceLine);
+  state.priceLineById.clear();
+  state.lines = lines;
+  const ids = new Set(lines.map((line) => line.id));
+  if (!ids.has(state.selectedLineId)) state.selectedLineId = null;
+  if (!ids.has(state.hoveredLineId)) state.hoveredLineId = null;
+
+  for (const line of lines) {
+    if (line.kind !== "horizontal") continue;
+    const priceLine = state.series.createPriceLine({
+      price: line.points[0].price,
+      color: LINE_COLOR,
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Solid,
+      axisLabelVisible: true,
+    });
+    state.priceLineById.set(line.id, priceLine);
+  }
+  refreshLineStyles();
 }
 
-function renderTrendLines(savedTrendLines, previewPoints = null) {
-  state.savedTrendLines = savedTrendLines;
-  const lines = savedTrendLines.map((line) => ({ points: line.points, color: LINE_COLOR, dashed: false }));
-  if (previewPoints) lines.push({ points: previewPoints, color: "#4d76e8", dashed: true });
-  state.trendLines.setLines(lines);
+function lineStyle(line) {
+  if (line.id === state.selectedLineId) return { color: SELECTED_COLOR, width: 3 };
+  if (line.id === state.hoveredLineId) return { color: LINE_COLOR, width: 3 };
+  return { color: LINE_COLOR, width: 1.5 };
 }
 
-// While placing the 2nd point of a trend line, preview it from the 1st point to the cursor.
+// Re-apply selection/hover emphasis to the chart, the table and the delete button.
+function refreshLineStyles() {
+  const trendLines = [];
+  for (const line of state.lines) {
+    const { color, width } = lineStyle(line);
+    if (line.kind === "horizontal") {
+      state.priceLineById.get(line.id)?.applyOptions({ color, lineWidth: Math.round(width) });
+    } else {
+      trendLines.push({ points: line.points, color, width, dashed: false });
+    }
+  }
+  if (state.previewPoints) {
+    trendLines.push({ points: state.previewPoints, color: PREVIEW_COLOR, width: 1.5, dashed: true });
+  }
+  state.trendLines.setLines(trendLines);
+
+  for (const tr of el.linesTableBody.rows) {
+    tr.classList.toggle("selected", tr.dataset.lineId === state.selectedLineId);
+    tr.classList.toggle("hovered", tr.dataset.lineId === state.hoveredLineId);
+  }
+  el.deleteSelected.hidden = state.selectedLineId === null;
+}
+
+function describeLine(line) {
+  const kind = line.kind === "horizontal" ? "水平線" : "トレンドライン";
+  return `${kind} ${line.points.map((p) => p.price.toFixed(2)).join(" → ")}`;
+}
+
+function selectLine(id) {
+  state.selectedLineId = id;
+  const line = state.lines.find((l) => l.id === id);
+  el.drawHint.textContent = line
+    ? `選択中: ${describeLine(line)}(Deleteキーでも削除 / Escで解除)`
+    : "";
+  refreshLineStyles();
+}
+
+function setHoveredLine(id) {
+  if (state.hoveredLineId === id) return;
+  state.hoveredLineId = id;
+  refreshLineStyles();
+}
+
+// The line nearest to pane coordinate (x, y) within HIT_TOLERANCE_PX, or null.
+function hitTestLine(x, y) {
+  let best = null;
+  let bestDistance = HIT_TOLERANCE_PX;
+  for (const line of state.lines) {
+    let distance;
+    if (line.kind === "horizontal") {
+      const lineY = state.series.priceToCoordinate(line.points[0].price);
+      if (lineY === null) continue;
+      distance = Math.abs(y - lineY);
+    } else {
+      // Trend lines are drawn as infinite lines, so measure to the line, not the segment.
+      const a = pricePointToXY(line.points[0]);
+      const b = pricePointToXY(line.points[1]);
+      if (!a || !b) continue;
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const length = Math.hypot(dx, dy);
+      if (length === 0) continue;
+      distance = Math.abs(dy * (x - a[0]) - dx * (y - a[1])) / length;
+    }
+    if (distance <= bestDistance) {
+      best = line;
+      bestDistance = distance;
+    }
+  }
+  return best?.id ?? null;
+}
+
 function onCrosshairMove(param) {
+  if (state.drawMode === "none") {
+    // Highlight the line under the cursor so it's clear what a click would select.
+    const id = param.point ? hitTestLine(param.point.x, param.point.y) : null;
+    el.chart.style.cursor = id ? "pointer" : "";
+    setHoveredLine(id);
+    return;
+  }
+  // While placing the 2nd point of a trend line, preview it from the 1st point to the cursor.
   if (state.drawMode !== "trend" || state.pendingPoints.length !== 1) return;
   const cursor = param.point ? coordinateToPricePoint(param.point.x, param.point.y) : null;
-  const preview = cursor && cursor.timestamp !== state.pendingPoints[0].timestamp ? [state.pendingPoints[0], cursor] : null;
-  renderTrendLines(state.savedTrendLines, preview);
+  state.previewPoints =
+    cursor && cursor.timestamp !== state.pendingPoints[0].timestamp ? [state.pendingPoints[0], cursor] : null;
+  refreshLineStyles();
 }
 
 function renderLinesTable(lines) {
   el.linesTableBody.innerHTML = "";
   for (const line of lines) {
     const tr = document.createElement("tr");
+    tr.dataset.lineId = line.id;
+    tr.addEventListener("mouseenter", () => setHoveredLine(line.id));
+    tr.addEventListener("mouseleave", () => setHoveredLine(null));
+    tr.addEventListener("click", () => {
+      if (state.drawMode !== "none") setMode("none");
+      selectLine(line.id);
+    });
 
     const kindTd = document.createElement("td");
     kindTd.textContent = line.kind === "horizontal" ? "水平線" : "トレンドライン";
@@ -346,7 +449,10 @@ function renderLinesTable(lines) {
     const actionsTd = document.createElement("td");
     const deleteBtn = document.createElement("button");
     deleteBtn.textContent = "削除";
-    deleteBtn.addEventListener("click", () => deleteLine(line.id));
+    deleteBtn.addEventListener("click", (event) => {
+      event.stopPropagation(); // don't also select the row
+      deleteLine(line.id).catch(showDeleteError);
+    });
     actionsTd.appendChild(deleteBtn);
     tr.appendChild(actionsTd);
 
@@ -356,13 +462,24 @@ function renderLinesTable(lines) {
 
 async function loadLines() {
   const lines = await api(`/lines?symbol=${encodeURIComponent(symbol())}`);
-  renderLinesOnChart(lines);
   renderLinesTable(lines);
+  renderLinesOnChart(lines);
 }
 
 async function deleteLine(id) {
   await api(`/lines/${id}`, { method: "DELETE" });
+  if (state.selectedLineId === id) selectLine(null);
   await loadLines();
+}
+
+function showDeleteError(err) {
+  console.error(err);
+  el.drawHint.textContent = `削除エラー: ${err.message}`;
+}
+
+function deleteSelectedLine() {
+  if (state.selectedLineId === null) return;
+  deleteLine(state.selectedLineId).catch(showDeleteError);
 }
 
 async function createLine(kind, points) {
@@ -386,10 +503,17 @@ function coordinateToPricePoint(x, y) {
 }
 
 async function onChartClick(event) {
-  if (state.drawMode === "none") return;
-
   const rect = el.chart.getBoundingClientRect();
-  const point = coordinateToPricePoint(event.clientX - rect.left, event.clientY - rect.top);
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+
+  if (state.drawMode === "none") {
+    // Click a line to select it; click empty space to clear the selection.
+    selectLine(hitTestLine(x, y));
+    return;
+  }
+
+  const point = coordinateToPricePoint(x, y);
   if (!point) return;
 
   if (state.drawMode === "horizontal") {
@@ -426,6 +550,18 @@ function wireControls() {
     btn.addEventListener("click", () => setMode(btn.dataset.mode));
   }
   state.chart.subscribeCrosshairMove(onCrosshairMove);
+  el.deleteSelected.addEventListener("click", deleteSelectedLine);
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement) return;
+    if ((event.key === "Delete" || event.key === "Backspace") && state.selectedLineId !== null) {
+      event.preventDefault();
+      deleteSelectedLine();
+    } else if (event.key === "Escape") {
+      if (state.drawMode !== "none") setMode("none");
+      else selectLine(null);
+    }
+  });
   // Native DOM clicks rather than chart.subscribeClick: Lightweight Charts swallows a click that
   // lands within 500ms of the previous one (its double-click detection), which would drop quickly
   // placed points.
