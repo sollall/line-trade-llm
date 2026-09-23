@@ -5,7 +5,10 @@ const state = {
   chart: null,
   series: null,
   trendLines: null, // TrendLinesPrimitive
-  candles: [],
+  candles: [], // ascending by timestamp; older pages get prepended while scrolling left
+  loadGeneration: 0, // bumped on symbol/timeframe reload so stale responses are dropped
+  loadingOlder: false,
+  historyExhausted: false, // the exchange returned nothing older
   drawMode: "none", // "none" | "horizontal" | "trend"
   pendingPoints: [], // collected {price, timestamp} while drawing a trend line
   priceLines: [], // IPriceLine handles for horizontal lines
@@ -13,10 +16,14 @@ const state = {
 };
 
 const LINE_COLOR = "#f0b429";
+const CANDLES_PER_PAGE = 1000;
+// Start fetching older candles when the view gets within this many bars of the oldest loaded one.
+const LOAD_OLDER_THRESHOLD_BARS = 50;
 
 const el = {
   apiBase: document.getElementById("apiBase"),
   symbol: document.getElementById("symbol"),
+  interval: document.getElementById("interval"),
   reload: document.getElementById("reload"),
   chart: document.getElementById("chart"),
   drawHint: document.getElementById("drawHint"),
@@ -30,6 +37,10 @@ function apiBase() {
 
 function symbol() {
   return el.symbol.value.trim();
+}
+
+function intervalMinutes() {
+  return Number(el.interval.value);
 }
 
 async function api(path, options) {
@@ -63,21 +74,39 @@ function setMode(mode) {
 // --- time <-> logical index ---
 // Lightweight Charts only resolves coordinates for times that exist in the data, but trend line
 // points (and clicks on the empty area right of the last bar) can fall outside it. Map epoch-ms
-// timestamps onto the bar index axis instead, assuming evenly spaced candles.
+// timestamps onto the bar index axis instead: interpolate between loaded candles (so gaps in the
+// exchange data don't skew lines) and extrapolate by the timeframe outside them.
 
 function barIntervalMs() {
-  const c = state.candles;
-  return c.length >= 2 ? c[1].timestamp - c[0].timestamp : 60_000;
+  return intervalMinutes() * 60_000;
 }
 
 function timestampToLogical(timestamp) {
-  if (state.candles.length === 0) return null;
-  return (timestamp - state.candles[0].timestamp) / barIntervalMs();
+  const c = state.candles;
+  if (c.length === 0) return null;
+  const last = c.length - 1;
+  if (timestamp <= c[0].timestamp) return (timestamp - c[0].timestamp) / barIntervalMs();
+  if (timestamp >= c[last].timestamp) return last + (timestamp - c[last].timestamp) / barIntervalMs();
+
+  // Binary search for c[lo].timestamp <= timestamp < c[lo + 1].timestamp.
+  let lo = 0;
+  let hi = last;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (c[mid].timestamp <= timestamp) lo = mid;
+    else hi = mid;
+  }
+  return lo + (timestamp - c[lo].timestamp) / (c[hi].timestamp - c[lo].timestamp);
 }
 
+// Only called with whole bar indices (clicks are snapped to a bar).
 function logicalToTimestamp(logical) {
-  if (state.candles.length === 0) return null;
-  return Math.round(state.candles[0].timestamp + logical * barIntervalMs());
+  const c = state.candles;
+  if (c.length === 0) return null;
+  const last = c.length - 1;
+  if (logical < 0) return c[0].timestamp + logical * barIntervalMs();
+  if (logical > last) return c[last].timestamp + (logical - last) * barIntervalMs();
+  return c[logical].timestamp;
 }
 
 // --- trend line primitive ---
@@ -114,6 +143,16 @@ class TrendLinesPaneRenderer {
   }
 }
 
+// timeScale.logicalToCoordinate() returns 0 for fractional indices, so interpolate between the
+// neighbouring whole bars ourselves (points between bars are common after changing timeframe).
+function logicalToX(timeScale, logical) {
+  const base = Math.floor(logical);
+  const x0 = timeScale.logicalToCoordinate(base);
+  const x1 = timeScale.logicalToCoordinate(base + 1);
+  if (x0 === null || x1 === null) return null;
+  return x0 + (logical - base) * (x1 - x0);
+}
+
 class TrendLinesPaneView {
   constructor(source) {
     this.source = source;
@@ -127,7 +166,7 @@ class TrendLinesPaneView {
     const toXY = (p) => {
       const logical = timestampToLogical(p.timestamp);
       if (logical === null) return null;
-      const x = timeScale.logicalToCoordinate(logical);
+      const x = logicalToX(timeScale, logical);
       const y = series.priceToCoordinate(p.price);
       return x === null || y === null ? null : [x, y];
     };
@@ -181,11 +220,19 @@ class TrendLinesPrimitive {
   }
 }
 
-async function loadCandles() {
-  const data = await api(`/candles?symbol=${encodeURIComponent(symbol())}&limit=300`);
-  state.candles = data;
+function fetchCandles(endTime) {
+  const params = new URLSearchParams({
+    symbol: symbol(),
+    interval: String(intervalMinutes()),
+    limit: String(CANDLES_PER_PAGE),
+  });
+  if (endTime !== undefined) params.set("endTime", String(endTime));
+  return api(`/candles?${params}`);
+}
+
+function setSeriesData() {
   state.series.setData(
-    data.map((c) => ({
+    state.candles.map((c) => ({
       time: Math.floor(c.timestamp / 1000),
       open: c.open,
       high: c.high,
@@ -193,7 +240,55 @@ async function loadCandles() {
       close: c.close,
     })),
   );
-  state.chart.timeScale().fitContent();
+}
+
+async function loadCandles() {
+  const generation = ++state.loadGeneration;
+  state.loadingOlder = false;
+  state.historyExhausted = false;
+  const data = await fetchCandles();
+  if (generation !== state.loadGeneration) return;
+  state.candles = data;
+  // Until the range is reset below, the previous scroll position (possibly at the left edge) still
+  // applies to the new data and would trigger an unwanted older-page load.
+  state.loadingOlder = true;
+  setSeriesData();
+  // Show roughly the latest 150 bars; older ones are a scroll away (and more load on demand).
+  const last = data.length - 1;
+  state.chart.timeScale().setVisibleLogicalRange({ from: last - 150, to: last + 5 });
+  requestAnimationFrame(() => {
+    if (generation === state.loadGeneration) state.loadingOlder = false;
+  });
+}
+
+async function loadOlderCandles() {
+  if (state.loadingOlder || state.historyExhausted || state.candles.length === 0) return;
+  const generation = state.loadGeneration;
+  state.loadingOlder = true;
+  try {
+    const older = await fetchCandles(state.candles[0].timestamp);
+    if (generation !== state.loadGeneration) return;
+    const firstTimestamp = state.candles[0].timestamp;
+    const fresh = older.filter((c) => c.timestamp < firstTimestamp);
+    if (fresh.length === 0) {
+      state.historyExhausted = true;
+      return;
+    }
+    // Prepending shifts every logical index; setData keeps the view anchored to the right edge,
+    // so the bars on screen stay put.
+    state.candles = [...fresh, ...state.candles];
+    setSeriesData();
+  } finally {
+    if (generation === state.loadGeneration) state.loadingOlder = false;
+  }
+}
+
+function onVisibleLogicalRangeChange(range) {
+  if (!range || range.from > LOAD_OLDER_THRESHOLD_BARS) return;
+  loadOlderCandles().catch((err) => {
+    console.error(err);
+    el.drawHint.textContent = `過去データの読み込みエラー: ${err.message}`;
+  });
 }
 
 function renderLinesOnChart(lines) {
@@ -319,6 +414,14 @@ async function onChartClick(event) {
 
 function wireControls() {
   el.reload.addEventListener("click", refreshAll);
+  el.interval.addEventListener("change", () => {
+    setMode("none");
+    loadCandles().catch((err) => {
+      console.error(err);
+      el.drawHint.textContent = `読み込みエラー: ${err.message}`;
+    });
+  });
+  state.chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleLogicalRangeChange);
   for (const btn of el.modeButtons) {
     btn.addEventListener("click", () => setMode(btn.dataset.mode));
   }
@@ -348,6 +451,22 @@ async function refreshAll() {
   await loadLines();
 }
 
+// Chart times are UTC epoch seconds; label them in the browser's local time. tickMarkType is
+// LightweightCharts.TickMarkType: 0 Year, 1 Month, 2 DayOfMonth, 3 Time, 4 TimeWithSeconds.
+function tickMarkFormatter(time, tickMarkType) {
+  const d = new Date(time * 1000);
+  switch (tickMarkType) {
+    case 0:
+      return String(d.getFullYear());
+    case 1:
+      return `${d.getFullYear()}/${d.getMonth() + 1}`;
+    case 2:
+      return `${d.getMonth() + 1}/${d.getDate()}`;
+    default:
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+}
+
 function init() {
   const { createChart, CandlestickSeries, CrosshairMode } = LightweightCharts;
   state.chart = createChart(el.chart, {
@@ -360,9 +479,7 @@ function init() {
       borderColor: "#2a2e37",
       timeVisible: true,
       secondsVisible: false,
-      // Chart times are UTC epoch seconds; label them in the browser's local time.
-      tickMarkFormatter: (time) =>
-        new Date(time * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      tickMarkFormatter,
     },
     localization: { timeFormatter: (time) => new Date(time * 1000).toLocaleString() },
   });

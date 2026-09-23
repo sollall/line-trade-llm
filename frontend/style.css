@@ -29,7 +29,7 @@ h1 { font-size: 1.1rem; margin: 0; }
   border-bottom: 1px solid #2a2e37;
 }
 
-input {
+input, select {
   background: #1a1d24;
   border: 1px solid #2a2e37;
   color: #e6e8eb;
