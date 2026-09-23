@@ -11,6 +11,6 @@
     "typecheck": "npm run typecheck --workspace shared && npm run typecheck --workspace worker && npm run typecheck --workspace backtest",
     "dev:worker": "npm run dev --workspace worker",
     "deploy:worker": "npm run deploy --workspace worker",
-    "backtest": "npm run start --workspace backtest"
+    "backtest": "npm run start --workspace backtest --"
   }
 }
