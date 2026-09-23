@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Line Trade LLM — ライン管理</title>
   <link rel="stylesheet" href="./style.css" />
-  <script src="https://cdn.jsdelivr.net/npm/klinecharts@10.0.3/dist/umd/klinecharts.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.2.1/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <header>
@@ -13,6 +13,21 @@
     <div class="controls">
       <label>API Base <input id="apiBase" type="text" value="http://localhost:8787" /></label>
       <label>Symbol <input id="symbol" type="text" value="BTC" /></label>
+      <label>時間足
+        <select id="interval">
+          <option value="1">1分</option>
+          <option value="3">3分</option>
+          <option value="5">5分</option>
+          <option value="15" selected>15分</option>
+          <option value="30">30分</option>
+          <option value="60">1時間</option>
+          <option value="120">2時間</option>
+          <option value="240">4時間</option>
+          <option value="480">8時間</option>
+          <option value="720">12時間</option>
+          <option value="1440">日足</option>
+        </select>
+      </label>
       <button id="reload">読み込み</button>
     </div>
   </header>
@@ -22,6 +37,7 @@
     <button id="modeHorizontal" data-mode="horizontal">水平線 (1クリック)</button>
     <button id="modeTrend" data-mode="trend">トレンドライン (2クリック)</button>
     <button id="modeNone" data-mode="none" class="active">なし</button>
+    <button id="deleteSelected" class="danger" hidden>選択中のラインを削除</button>
     <span id="drawHint"></span>
   </div>
 

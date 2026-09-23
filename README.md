@@ -10,7 +10,7 @@ line-trade-llm/
               同じロジックで動くよう共有するTypeScriptコード
   worker/     Cloudflare Workers本体。POST/GET/DELETE /lines, GET /candles, 1分間隔のCron Trigger
   backtest/   過去データに対してタッチ検知→LLM判定→仮想売買を再生し、勝率等を集計するCLI
-  frontend/   KLineCharts(CDN読込)によるライン描画UI。静的ファイルなのでどこでもホスト可能
+  frontend/   TradingView Lightweight Charts(CDN読込)によるライン描画UI。静的ファイルなのでどこでもホスト可能
 ```
 
 `shared/` にタッチ判定(`touch.ts`)・LLMプロンプト構築とClaude呼び出し(`llm/`)・取引所クライアント(`exchanges/`)をまとめてあるのは、**本番のCron判定とバックテストの再生が完全に同じロジックで動く**ことを保証するためです。バックテストの結果が本番の挙動をそのまま予測できないと検証の意味がありません。
@@ -60,9 +60,12 @@ npm run deploy:worker   # 本番デプロイ
 
 `frontend/` はビルド不要の静的ファイル(`index.html` / `app.js` / `style.css`)です。`npx serve frontend` 等で配信するか、Cloudflare Pages 等にそのまま置いてください。画面上部の「API Base」にWorkerのURLを入力すれば動作します。
 
-- KLineCharts(CDN, jsdelivr)でローソク足を表示(データはWorkerの `GET /candles` 経由で取引所から取得)
+- [TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts)(Apache-2.0, CDN/jsdelivr)でローソク足を表示(データはWorkerの `GET /candles` 経由で取引所から取得)。ライセンス上の帰属表示としてチャート左下のTradingViewロゴ(`attributionLogo`)は有効のままにしています
+- Lightweight Chartsには描画ツールが無いため、水平線は `createPriceLine`、トレンドラインは自前のSeries Primitive(`frontend/app.js` の `TrendLinesPrimitive`)で描画しています。トレンドラインはタッチ判定(`shared/src/touch.ts` の `lineValueAt`)と同じく2点を通る直線として両方向に延長して表示します
+- 「時間足」で表示する足(1分〜日足)を切り替えられます。これは表示用で、Cron判定に使う足は `CANDLE_INTERVAL_MINUTES` のままです。ラインは時刻と価格で保存しているので、どの時間足で引いても同じラインとして扱われます
+- 初回は直近1000本を読み込み、チャートを左端近くまでスクロールすると更に1000本ずつ過去を読み込みます。取引所が返せる範囲が上限で、Hyperliquidは時間足ごとに直近5000本までしか返さないため、1分足なら約3.5日、15分足なら約52日、日足なら約13年が遡れる目安です
 - 「水平線」ボタン→チャートを1クリックで水平線を保存、「トレンドライン」ボタン→2クリックで保存
-- 登録済みラインの一覧・削除
+- 登録済みラインの一覧・削除。描画モードが「なし」のときにチャート上のラインをクリック(または一覧の行をクリック)すると選択状態になり、「選択中のラインを削除」ボタンかDeleteキーで削除できます(Escで選択解除)。カーソルを乗せたラインと、一覧でマウスを乗せた行のラインは太く強調表示されます
 
 ## API
 
@@ -71,7 +74,7 @@ npm run deploy:worker   # 本番デプロイ
 | `POST /lines` | ライン登録。body: `{ symbol, kind: "horizontal"\|"trend", points: {price,timestamp}[] }` |
 | `GET /lines?symbol=` | ライン一覧取得 |
 | `DELETE /lines/{id}` | ライン削除 |
-| `GET /candles?symbol=&limit=` | チャート表示用のOHLCV取得(取引所へのプロキシ) |
+| `GET /candles?symbol=&interval=&limit=&endTime=` | チャート表示用のOHLCV取得(取引所へのプロキシ)。`interval`は分(1,3,5,15,30,60,120,240,480,720,1440、省略時は`CANDLE_INTERVAL_MINUTES`)、`limit`は`endTime`(epoch ms、省略時は現在)以前の本数で最大5000。取引所の1リクエストあたりの上限を超える分はページングして取得 |
 
 Cron Trigger(1分間隔)が全ラインを銘柄ごとにまとめて価格・ローソク足を取得し、タッチ検知→(タッチ済みなら)LLM判定を行い、`touch_events` に記録します。判定が`undetermined`の場合は次のCronサイクルで再判定します(仕様6.4)。API/LLM呼び出しの失敗は`status: failed`として次のCronに委ねます(仕様4.2)。
 

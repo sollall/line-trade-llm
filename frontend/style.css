@@ -29,7 +29,7 @@ h1 { font-size: 1.1rem; margin: 0; }
   border-bottom: 1px solid #2a2e37;
 }
 
-input {
+input, select {
   background: #1a1d24;
   border: 1px solid #2a2e37;
   color: #e6e8eb;
@@ -44,20 +44,35 @@ button {
   border-radius: 4px;
   padding: 0.35rem 0.7rem;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 button.active { background: #3b6fe0; border-color: #3b6fe0; }
 button:hover { border-color: #4d76e8; }
+button.danger { border-color: #ef5350; color: #ef5350; }
+button.danger:hover { background: #ef5350; color: #fff; }
+button[hidden] { display: none; }
 
 #chart {
   width: 100%;
   height: 520px;
 }
 
-#drawHint { color: #9aa3b2; }
+#drawHint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #9aa3b2;
+}
 
 section { padding: 1rem; }
 
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #2a2e37; }
 th { color: #9aa3b2; font-weight: 500; }
+
+#linesTable tbody tr { cursor: pointer; }
+#linesTable tbody tr.hovered { background: #1a1d24; }
+#linesTable tbody tr.selected { background: #1e3a5f; }
