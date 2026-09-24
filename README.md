@@ -67,6 +67,7 @@ npm run deploy:worker   # 本番デプロイ
 
 - [TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts)(Apache-2.0, CDN/jsdelivr)でローソク足を表示(データはWorkerの `GET /candles` 経由で取引所から取得)。ライセンス上の帰属表示としてチャート左下のTradingViewロゴ(`attributionLogo`)は有効のままにしています
 - Lightweight Chartsには描画ツールが無いため、水平線は `createPriceLine`、トレンドラインは自前のSeries Primitive(`frontend/app.js` の `TrendLinesPrimitive`)で描画しています。トレンドラインは判定(`shared/src/line.ts` の `lineValueAt`)と同じく2点を通る直線として両方向に延長して表示します
+- 「Symbol」は `GET /symbols` で取得した、`EXCHANGE`(デフォルトはHyperliquid)で現在取引可能な銘柄だけをプルダウンで表示します(24h出来高の多い順)。Hyperliquidの場合はメインDEXのPerp銘柄で、上場廃止(delisted)銘柄は除外されます。一覧は「読み込み」ボタンで再取得します
 - 「時間足」で表示する足(1分〜日足)を切り替えられます。これは表示用で、判定に使う足はライン作成時に「判定足」で選んだものです(作成後は変更不可)。ラインは時刻と価格で保存しているので、どの時間足で引いても同じラインとして扱われます
 - 初回は直近1000本を読み込み、チャートを左端近くまでスクロールすると更に1000本ずつ過去を読み込みます。取引所が返せる範囲が上限で、Hyperliquidは時間足ごとに直近5000本までしか返さないため、1分足なら約3.5日、15分足なら約52日、日足なら約13年が遡れる目安です
 - 「水平線」ボタン→チャートを1クリックで水平線を保存、「トレンドライン」ボタン→2クリックで保存
@@ -82,6 +83,7 @@ npm run deploy:worker   # 本番デプロイ
 | `GET /lines?symbol=` | ライン一覧取得。各ラインに現在の `state` / `state_since`(その状態になった足の時刻) / `last_checked_candle` を含む |
 | `GET /lines/{id}/checks?limit=&changes_only=1` | ラインの判定履歴(新しい順、既定100件・最大1000件)。各判定に送ったプロンプト全文・状態・確信度・理由を含む。`changes_only=1` で状態が変わった判定のみ |
 | `DELETE /lines/{id}` | ライン削除 |
+| `GET /symbols` | `EXCHANGE` で取引可能な銘柄一覧。`[{ symbol, dayVolume }]` を24h出来高(quote建て)の降順で返す。Hyperliquidは `metaAndAssetCtxs` のメインDEX Perpから上場廃止銘柄を除いたもの |
 | `GET /candles?symbol=&interval=&limit=&endTime=` | チャート表示用のOHLCV取得(取引所へのプロキシ)。`interval`は分(1,3,5,15,30,60,120,240,480,720,1440、省略時は`DEFAULT_CHECK_INTERVAL_MINUTES`)、`limit`は`endTime`(epoch ms、省略時は現在)以前の本数で最大5000。取引所の1リクエストあたりの上限を超える分はページングして取得 |
 
 ### 定期判定の流れ

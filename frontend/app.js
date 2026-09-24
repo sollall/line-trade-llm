@@ -1,5 +1,5 @@
 // Plain-JS line drawing UI on top of TradingView Lightweight Charts (loaded via CDN in index.html).
-// Talks to the Cloudflare Worker API (GET/POST /lines, DELETE /lines/{id}, GET /lines/{id}/checks, GET /candles).
+// Talks to the Cloudflare Worker API (GET/POST /lines, DELETE /lines/{id}, GET /lines/{id}/checks, GET /candles, GET /symbols).
 
 const state = {
   chart: null,
@@ -35,6 +35,7 @@ const PREVIEW_COLOR = "#4d76e8";
 // How close (px) the cursor must be to a line to hover/select it.
 const HIT_TOLERANCE_PX = 6;
 const CANDLES_PER_PAGE = 1000;
+const DEFAULT_SYMBOL = "BTC";
 // Start fetching older candles when the view gets within this many bars of the oldest loaded one.
 const LOAD_OLDER_THRESHOLD_BARS = 50;
 
@@ -141,7 +142,7 @@ function logicalToTimestamp(logical) {
 
 // --- trend line primitive ---
 // Lightweight Charts has no drawing tools, so trend lines are drawn by a series primitive. Each line
-// is extended across the whole pane in both directions, matching lineValueAt() in shared/src/touch.ts.
+// is extended across the whole pane in both directions, matching lineValueAt() in shared/src/line.ts.
 
 class TrendLinesPaneRenderer {
   constructor(segments) {
@@ -633,7 +634,19 @@ async function onChartClick(event) {
 }
 
 function wireControls() {
-  el.reload.addEventListener("click", refreshAll);
+  el.reload.addEventListener("click", () => {
+    refreshAll().catch((err) => {
+      console.error(err);
+      el.drawHint.textContent = `読み込みエラー: ${err.message}`;
+    });
+  });
+  el.symbol.addEventListener("change", () => {
+    setMode("none");
+    Promise.all([loadCandles(), loadLines()]).catch((err) => {
+      console.error(err);
+      el.drawHint.textContent = `読み込みエラー: ${err.message}`;
+    });
+  });
   el.interval.addEventListener("change", () => {
     setMode("none");
     loadCandles().catch((err) => {
@@ -685,7 +698,27 @@ function wireControls() {
   });
 }
 
+// Fill the Symbol dropdown with the markets tradable on the Worker's EXCHANGE (most liquid first),
+// keeping the current choice when it is still listed.
+async function loadSymbols() {
+  const symbols = await api("/symbols");
+  if (symbols.length === 0) return;
+  const current = symbol() || DEFAULT_SYMBOL;
+  el.symbol.replaceChildren(
+    ...symbols.map(({ symbol: s }) => {
+      const option = document.createElement("option");
+      option.value = s;
+      option.textContent = s;
+      return option;
+    }),
+  );
+  const names = symbols.map((s) => s.symbol);
+  el.symbol.value = names.includes(current) ? current : names.includes(DEFAULT_SYMBOL) ? DEFAULT_SYMBOL : names[0];
+}
+
 async function refreshAll() {
+  // A failed symbol list shouldn't block the chart: keep whatever the dropdown already offers.
+  await loadSymbols().catch((err) => console.error(err));
   await loadCandles();
   await loadLines();
 }

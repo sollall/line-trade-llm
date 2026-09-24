@@ -2,6 +2,7 @@ import { runCronPoll } from "./cron.js";
 import type { Env } from "./env.js";
 import { handleGetCandles } from "./routes/candles.js";
 import { handleCreateLine, handleDeleteLine, handleListLineChecks, handleListLines } from "./routes/lines.js";
+import { handleListSymbols } from "./routes/symbols.js";
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
@@ -40,6 +41,9 @@ export default {
       }
       if (url.pathname === "/candles" && request.method === "GET") {
         return withCors(await handleGetCandles(request, env));
+      }
+      if (url.pathname === "/symbols" && request.method === "GET") {
+        return withCors(await handleListSymbols(env));
       }
 
       return withCors(new Response(JSON.stringify({ error: "not found" }), { status: 404 }));

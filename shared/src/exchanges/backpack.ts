@@ -1,5 +1,5 @@
 import type { OHLCV } from "../types.js";
-import type { CurrentPrice, ExchangeClient } from "./types.js";
+import type { CurrentPrice, ExchangeClient, TradableSymbol } from "./types.js";
 
 // https://docs.backpack.exchange/ (public market data endpoints)
 // NOTE: verify exact field names/limits against current docs before relying
@@ -24,6 +24,12 @@ interface BackpackKline {
 interface BackpackTicker {
   symbol: string;
   lastPrice: string;
+  quoteVolume?: string;
+}
+
+interface BackpackMarket {
+  symbol: string;
+  orderBookState?: string; // "Open" when tradable
 }
 
 async function getJson<T>(path: string, fetchImpl: typeof fetch): Promise<T> {
@@ -37,6 +43,18 @@ async function getJson<T>(path: string, fetchImpl: typeof fetch): Promise<T> {
 
 export const backpackClient: ExchangeClient = {
   id: "backpack",
+
+  async listSymbols(fetchImpl = fetch): Promise<TradableSymbol[]> {
+    const [markets, tickers] = await Promise.all([
+      getJson<BackpackMarket[]>("/markets", fetchImpl),
+      getJson<BackpackTicker[]>("/tickers", fetchImpl),
+    ]);
+    const volumeBySymbol = new Map(tickers.map((t) => [t.symbol, Number(t.quoteVolume ?? 0)]));
+    return markets
+      .filter((m) => m.orderBookState === undefined || m.orderBookState === "Open")
+      .map((m) => ({ symbol: m.symbol, dayVolume: volumeBySymbol.get(m.symbol) ?? 0 }))
+      .sort((a, b) => b.dayVolume - a.dayVolume);
+  },
 
   async getCurrentPrice(symbol, fetchImpl = fetch): Promise<CurrentPrice> {
     const ticker = await getJson<BackpackTicker>(`/ticker?symbol=${encodeURIComponent(symbol)}`, fetchImpl);
