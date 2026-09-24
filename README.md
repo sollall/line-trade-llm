@@ -108,6 +108,7 @@ LLM呼び出しは1回の判定につき最大3回(初回+2回リトライ)ま�
 
 ```bash
 # lines.json は GET /lines のレスポンスをそのまま保存したもの(各ラインの check_interval_minutes の足で再生)
+# (リポジトリ直下で実行。--lines / --out の相対パスは npm を実行したディレクトリ基準)
 curl "http://localhost:8787/lines?symbol=BTC" > lines.json
 
 npm run backtest -- \

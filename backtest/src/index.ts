@@ -54,7 +54,20 @@ async function main() {
   if (!values.lines || !values.symbol || !values.start || !values.end) usage();
   if (values.llm !== "claude" && values.llm !== "mock") usage();
 
-  const linesRaw = await readFile(values.lines, "utf8");
+  // `npm run backtest` runs inside the backtest/ workspace, so resolve relative paths against the
+  // directory npm was invoked from (INIT_CWD) rather than backtest/.
+  const baseDir = process.env.INIT_CWD ?? process.cwd();
+  const linesPath = path.resolve(baseDir, values.lines);
+  const outDir = path.resolve(baseDir, values.out!);
+
+  let linesRaw: string;
+  try {
+    linesRaw = await readFile(linesPath, "utf8");
+  } catch {
+    console.error(`Could not read ${linesPath}. Save the lines first, e.g.:
+  curl "http://localhost:8787/lines?symbol=${values.symbol}" > lines.json`);
+    process.exit(1);
+  }
   const allLines = JSON.parse(linesRaw) as Line[];
   const fallbackInterval = Number(values.interval);
   // Lines exported before per-line check timeframes existed have no check_interval_minutes.
@@ -62,7 +75,7 @@ async function main() {
     .filter((l) => l.symbol === values.symbol)
     .map((l) => ({ ...l, check_interval_minutes: l.check_interval_minutes ?? fallbackInterval }));
   if (lines.length === 0) {
-    console.error(`No lines for symbol "${values.symbol}" found in ${values.lines}`);
+    console.error(`No lines for symbol "${values.symbol}" found in ${linesPath}`);
     process.exit(1);
   }
 
@@ -90,6 +103,11 @@ async function main() {
     const candles = await client.getCandles(values.symbol, intervalMinutes, startTime, endTime);
     candlesByInterval.set(intervalMinutes, candles.sort((a, b) => a.timestamp - b.timestamp));
     console.error(`Fetched ${candles.length} candles.`);
+    if (candles.length === 0) {
+      console.error(
+        `  No ${intervalMinutes}m candles returned for this period. Hyperliquid only serves the most recent 5000 candles per timeframe (15m: ~52 days, 1m: ~3.5 days), so pick a recent --start/--end.`,
+      );
+    }
   }
 
   console.error(`Replaying periodic line checks against ${lines.length} line(s), llm mode=${config.llmMode}...`);
@@ -119,13 +137,13 @@ async function main() {
     total_trades: metrics.total_trades,
   };
 
-  await mkdir(values.out, { recursive: true });
-  await writeFile(path.join(values.out, "backtest_result.json"), JSON.stringify(backtestResult, null, 2));
-  await writeFile(path.join(values.out, "trades.json"), JSON.stringify(trades, null, 2));
-  await writeFile(path.join(values.out, "check_log.json"), JSON.stringify(checkLog, null, 2));
+  await mkdir(outDir, { recursive: true });
+  await writeFile(path.join(outDir, "backtest_result.json"), JSON.stringify(backtestResult, null, 2));
+  await writeFile(path.join(outDir, "trades.json"), JSON.stringify(trades, null, 2));
+  await writeFile(path.join(outDir, "check_log.json"), JSON.stringify(checkLog, null, 2));
 
   console.log(JSON.stringify(backtestResult, null, 2));
-  console.error(`\nWrote results to ${values.out}/`);
+  console.error(`\nWrote results to ${outDir}/`);
 }
 
 main().catch((err) => {
