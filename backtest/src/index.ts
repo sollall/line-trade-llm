@@ -69,7 +69,16 @@ async function main() {
   curl "http://localhost:8787/lines?symbol=${values.symbol}" > lines.json`);
     process.exit(1);
   }
-  const allLines = JSON.parse(linesRaw) as Line[];
+  let allLines: Line[];
+  try {
+    allLines = JSON.parse(linesRaw) as Line[];
+    if (!Array.isArray(allLines)) throw new Error("not an array");
+  } catch {
+    // An empty file usually means the curl export ran while the Worker was down or erroring.
+    console.error(`${linesPath} is empty or not a JSON array of lines. Export it again with the Worker running:
+  curl "http://localhost:8787/lines?symbol=${values.symbol}" > lines.json`);
+    process.exit(1);
+  }
   const fallbackInterval = Number(values.interval);
   // Lines exported before per-line check timeframes existed have no check_interval_minutes.
   const lines = allLines

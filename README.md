@@ -109,7 +109,7 @@ curl "http://localhost:8787/__scheduled?cron=*+*+*+*+*"
 | ローカルのD1・KV(判定キャッシュ)を丸ごと消してテーブルを作り直す | `npm run db:reset:local` |
 | 1本だけ消す | 画面の「削除」ボタン、またはラインを選択してDeleteキー |
 
-- `db:reset:local` は Worker(`wrangler dev`)を止めてから実行し、終わったら起動し直してください
+- `db:reset:local` は Worker(`wrangler dev`)を止めてから実行し、終わったら起動し直してください。起動したまま実行すると、Workerが消えたDBを掴んだままになり、ラインの保存などが `500 {"error":"internal error; reference = ..."}` で失敗します(Workerを再起動すれば直ります)
 - `no such table: line_checks` などのエラーが出る場合は、ローカルD1がタッチ判定版の旧スキーマのままです。データが不要なら `npm run db:reset:local`、残したいなら `cd worker && npm run db:migrate:periodic:local` を実行してください
 - 消したあとにバックテストする場合は、ラインを引き直してから `curl "http://localhost:8787/lines?symbol=BTC" > lines.json` で書き出し直してください
 
