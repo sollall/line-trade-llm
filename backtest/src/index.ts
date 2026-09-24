@@ -63,6 +63,7 @@ async function main() {
   let linesRaw: string;
   try {
     linesRaw = await readFile(linesPath, "utf8");
+    console.error(`Loaded lines from ${linesPath}`);
   } catch {
     console.error(`Could not read ${linesPath}. Save the lines first, e.g.:
   curl "http://localhost:8787/lines?symbol=${values.symbol}" > lines.json`);
@@ -114,9 +115,21 @@ async function main() {
   const trades: SimulatedTrade[] = [];
   const checkLog: ReplayCheckLog[] = [];
   for (const line of lines) {
-    const output = await replayLine(config, line, candlesByInterval.get(line.check_interval_minutes) ?? []);
+    const candles = candlesByInterval.get(line.check_interval_minutes) ?? [];
+    const output = await replayLine(config, line, candles);
     trades.push(...output.trades);
     checkLog.push(...output.checkLog);
+
+    const changes = output.checkLog.filter((c) => c.state_changed).length;
+    const prices = line.points.map((p) => p.price).join(" -> ");
+    console.error(
+      `  ${line.id} (${line.kind} ${prices}, ${line.check_interval_minutes}m): ${output.checkLog.length} checks, ${changes} state changes, ${output.trades.length} trades`,
+    );
+    if (output.checkLog.length === 0 && candles.length > 0) {
+      const low = candles.reduce((min, c) => Math.min(min, c.low), Infinity);
+      const high = candles.reduce((max, c) => Math.max(max, c.high), -Infinity);
+      console.error(`    never near price: the period traded between ${low} and ${high}, so the LLM was never asked about this line`);
+    }
   }
   // Drawdown depends on trade order, so interleave the lines' trades chronologically.
   trades.sort((a, b) => a.entry_time - b.entry_time);
