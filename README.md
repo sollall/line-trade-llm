@@ -75,6 +75,44 @@ npm run deploy:worker   # 本番デプロイ
 - 登録済みラインの一覧に判定足と現在の状態を表示。行を選択すると下に「判定履歴」(判定した足・状態・確信度・理由、LLMに送ったプロンプト全文)が出ます。「状態が変わった判定だけ表示」で絞り込めます
 - 登録済みラインの一覧・削除。描画モードが「なし」のときにチャート上のラインをクリック(または一覧の行をクリック)すると選択状態になり、「選択中のラインを削除」ボタンかDeleteキーで削除できます(Escで選択解除)。カーソルを乗せたラインと、一覧でマウスを乗せた行のラインは太く強調表示されます
 
+## ローカルでの動作確認
+
+Cloudflareへのデプロイやアカウントは不要です。外部に接続するのは取引所の公開API(キー不要)と、LLM判定時のClaude APIだけです。
+
+### 起動
+
+```bash
+cd worker
+npm run db:migrate:local                          # 初回だけ。ローカルD1にテーブルを作る
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .dev.vars   # 初回だけ(.gitignore済み)
+cd ..
+
+npm run dev:worker:test   # ターミナル1: Worker(Cronを手動で動かせるモード)
+npx serve frontend        # ターミナル2: フロント(表示されたURLを開き、API Baseを http://localhost:8787 に)
+```
+
+ローカルではCronが自動では動きません。判定足が確定した後に、次のコマンドで1回分を手動実行します。
+
+```bash
+curl "http://localhost:8787/__scheduled?cron=*+*+*+*+*"
+```
+
+判定足を「1分」にして現在価格のすぐ近くに線を引くと、1分待つだけで判定を確認できます(遠い線はLLMを呼ばずにスキップされます)。結果は画面の「状態」列と「判定履歴」、または `GET /lines/{id}/checks` で確認できます。
+
+### データの保存場所とリセット
+
+引いたラインと判定履歴は、Workerのローカル D1(`worker/.wrangler/state/` 内のSQLite)に保存されています。`lines.json` はバックテスト用に書き出したコピーなので、編集・削除しても画面やCronには影響しません。
+
+| やりたいこと | コマンド(リポジトリ直下) |
+|---|---|
+| ラインと判定履歴だけ全部消す | `npm run db:clear:local` |
+| ローカルのD1・KV(判定キャッシュ)を丸ごと消してテーブルを作り直す | `npm run db:reset:local` |
+| 1本だけ消す | 画面の「削除」ボタン、またはラインを選択してDeleteキー |
+
+- `db:reset:local` は Worker(`wrangler dev`)を止めてから実行し、終わったら起動し直してください
+- `no such table: line_checks` などのエラーが出る場合は、ローカルD1がタッチ判定版の旧スキーマのままです。データが不要なら `npm run db:reset:local`、残したいなら `cd worker && npm run db:migrate:periodic:local` を実行してください
+- 消したあとにバックテストする場合は、ラインを引き直してから `curl "http://localhost:8787/lines?symbol=BTC" > lines.json` で書き出し直してください
+
 ## API
 
 | エンドポイント | 説明 |

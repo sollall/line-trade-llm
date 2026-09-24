@@ -10,6 +10,9 @@
   "scripts": {
     "typecheck": "npm run typecheck --workspace shared && npm run typecheck --workspace worker && npm run typecheck --workspace backtest",
     "dev:worker": "npm run dev --workspace worker",
+    "dev:worker:test": "npm run dev:test --workspace worker",
+    "db:clear:local": "npm run db:clear:local --workspace worker",
+    "db:reset:local": "npm run db:reset:local --workspace worker",
     "deploy:worker": "npm run deploy --workspace worker",
     "backtest": "npm run start --workspace backtest --"
   }
