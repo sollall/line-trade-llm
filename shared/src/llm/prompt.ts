@@ -40,14 +40,23 @@ function intervalLabel(minutes: number): string {
   return `${minutes}m`;
 }
 
+/** The line exactly as the trader drew it: its anchor point(s), and for trend lines the slope. */
+function describeLine(line: Line, intervalMinutes: number): string {
+  const at = (p: { price: number; timestamp: number }) => `${p.price} @ ${new Date(p.timestamp).toISOString()}`;
+  const [p0, p1] = line.points;
+  if (line.kind === "horizontal" || !p0 || !p1) {
+    return p0 ? `horizontal line at ${p0.price} (drawn at ${new Date(p0.timestamp).toISOString()})` : "horizontal line";
+  }
+  const perCandle = ((p1.price - p0.price) / (p1.timestamp - p0.timestamp)) * intervalMinutes * 60_000;
+  return `trend line drawn through ${at(p0)} and ${at(p1)}, extended in both directions (slope ${perCandle >= 0 ? "+" : ""}${perCandle.toPrecision(6)} per ${intervalLabel(intervalMinutes)} candle; its value at each candle below is given as "line")`;
+}
+
 export function buildLineCheckPrompt(ctx: LineCheckContext): string {
   const latest = ctx.candles[ctx.candles.length - 1];
   const latestLineValue = latest ? lineValueAt(ctx.line, latest.timestamp) : null;
   const isTrend = ctx.line.kind === "trend";
 
-  const lineDescription = isTrend
-    ? `trend line (its value at each candle is given as "line")`
-    : `horizontal line at ${latestLineValue}`;
+  const lineDescription = describeLine(ctx.line, ctx.intervalMinutes);
 
   let position = "unknown";
   if (latest && latestLineValue) {

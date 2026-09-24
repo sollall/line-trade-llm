@@ -29,7 +29,8 @@ export interface ReplayCheckLog {
 
 export interface ReplayConfig {
   candleWindow: number;
-  checkMarginPct: number;
+  /** null = send every line to the LLM on every candle (the default, same as the live Worker). */
+  checkMarginPct: number | null;
   riskRewardRatio: number;
   maxHoldBars: number;
   llmMode: "claude" | "mock";

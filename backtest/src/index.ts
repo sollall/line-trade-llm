@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_CHECK_MARGIN_PCT, getExchangeClient, type BacktestResult, type ExchangeId, type Line, type OHLCV } from "shared";
+import { getExchangeClient, type BacktestResult, type ExchangeId, type Line, type OHLCV } from "shared";
 import { computeMetrics } from "./metrics.js";
 import { replayLine } from "./replay.js";
 import type { ReplayCheckLog, ReplayConfig, SimulatedTrade } from "./types.js";
@@ -19,8 +19,8 @@ Options:
   --exchange <id>          hyperliquid | backpack (default: hyperliquid)
   --interval <minutes>     Check timeframe for lines without check_interval_minutes (default: 15)
   --window <n>              Closed candles fed to the LLM per check (default: 15)
-  --margin-pct <n>          Skip the LLM when the line is farther than this fraction outside the
-                            window's low-high range (default: ${DEFAULT_CHECK_MARGIN_PCT})
+  --margin-pct <n>          Optional: skip the LLM when the line is farther than this fraction outside
+                            the window's low-high range (default: off, every candle is checked)
   --rr <n>                  Take-profit risk:reward multiple (default: 2)
   --max-hold-bars <n>       Max candles a simulated trade is held (default: 60)
   --llm <mode>              claude | mock (default: mock, no API cost)
@@ -41,7 +41,7 @@ async function main() {
       exchange: { type: "string", default: "hyperliquid" },
       interval: { type: "string", default: "15" },
       window: { type: "string", default: "15" },
-      "margin-pct": { type: "string", default: String(DEFAULT_CHECK_MARGIN_PCT) },
+      "margin-pct": { type: "string" },
       rr: { type: "string", default: "2" },
       "max-hold-bars": { type: "string", default: "60" },
       llm: { type: "string", default: "mock" },
@@ -98,7 +98,7 @@ async function main() {
 
   const config: ReplayConfig = {
     candleWindow: Number(values.window),
-    checkMarginPct: Number(values["margin-pct"]),
+    checkMarginPct: values["margin-pct"] === undefined ? null : Number(values["margin-pct"]),
     riskRewardRatio: Number(values.rr),
     maxHoldBars: Number(values["max-hold-bars"]),
     llmMode: values.llm as "claude" | "mock",
@@ -134,10 +134,10 @@ async function main() {
     console.error(
       `  ${line.id} (${line.kind} ${prices}, ${line.check_interval_minutes}m): ${output.checkLog.length} checks, ${changes} state changes, ${output.trades.length} trades`,
     );
-    if (output.checkLog.length === 0 && candles.length > 0) {
+    if (output.checkLog.length === 0 && candles.length > 0 && config.checkMarginPct !== null) {
       const low = candles.reduce((min, c) => Math.min(min, c.low), Infinity);
       const high = candles.reduce((max, c) => Math.max(max, c.high), -Infinity);
-      console.error(`    never near price: the period traded between ${low} and ${high}, so the LLM was never asked about this line`);
+      console.error(`    never near price: the period traded between ${low} and ${high}, so --margin-pct skipped every candle`);
     }
   }
   // Drawdown depends on trade order, so interleave the lines' trades chronologically.

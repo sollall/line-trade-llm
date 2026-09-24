@@ -29,14 +29,16 @@ async function withRetries<T>(fn: () => Promise<T>, retries: number): Promise<T>
 
 /**
  * Checks one line against the candle window ending at its latest closed candle and records the
- * LLM's state. Lines far from price are marked as checked without calling the LLM. On LLM/network
- * failure nothing is recorded, so the next Cron tick retries the same candle (spec 4.2).
+ * LLM's state. Every line is sent to the LLM unless the optional CHECK_MARGIN_PCT filter is set and
+ * the line is far from price. On LLM/network failure nothing is recorded, so the next Cron tick
+ * retries the same candle (spec 4.2).
  */
 export async function checkLine(env: Env, line: Line, candles: OHLCV[]): Promise<void> {
   const latest = candles[candles.length - 1];
   if (!latest) return;
 
-  if (!isLineNearCandles(line, candles, checkMarginPct(env))) {
+  const marginPct = checkMarginPct(env);
+  if (marginPct !== null && !isLineNearCandles(line, candles, marginPct)) {
     await markLineChecked(env, line.id, latest.timestamp);
     return;
   }

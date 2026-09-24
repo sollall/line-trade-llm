@@ -1,4 +1,4 @@
-import { DEFAULT_CHECK_MARGIN_PCT, type ExchangeId } from "shared";
+import type { ExchangeId } from "shared";
 
 export interface Env {
   DB: D1Database;
@@ -9,7 +9,7 @@ export interface Env {
   EXCHANGE: ExchangeId;
   DEFAULT_CHECK_INTERVAL_MINUTES: string;
   CANDLE_WINDOW: string;
-  CHECK_MARGIN_PCT: string;
+  CHECK_MARGIN_PCT?: string;
   CLAUDE_MODEL: string;
 }
 
@@ -22,8 +22,10 @@ export function candleWindow(env: Env): number {
   return Number(env.CANDLE_WINDOW) || 15;
 }
 
-export function checkMarginPct(env: Env): number {
-  return Number(env.CHECK_MARGIN_PCT) || DEFAULT_CHECK_MARGIN_PCT;
+/** Optional cost filter: skip the LLM for lines this far outside recent prices. null = check every line. */
+export function checkMarginPct(env: Env): number | null {
+  const value = Number(env.CHECK_MARGIN_PCT);
+  return env.CHECK_MARGIN_PCT && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 export function claudeModel(env: Env): string {

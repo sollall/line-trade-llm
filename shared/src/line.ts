@@ -23,9 +23,10 @@ export function lineValueAt(line: Line, timestamp: number): number | null {
 }
 
 /**
- * Whether a line is close enough to the recent candles to be worth an LLM check: its value falls
- * inside the window's low-high range (evaluated per candle, so trend lines work too), widened by
- * `marginPct` of the line value. Lines far from price are skipped so they don't cost API calls.
+ * Whether a line is close to the recent candles: its value falls inside the window's low-high range
+ * (evaluated per candle, so trend lines work too), widened by `marginPct` of the line value.
+ * Only used when the optional CHECK_MARGIN_PCT / --margin-pct filter is enabled to cut API calls;
+ * by default every line is sent to the LLM on every candle close.
  */
 export function isLineNearCandles(line: Line, candles: OHLCV[], marginPct: number): boolean {
   return candles.some((c) => {
@@ -35,8 +36,6 @@ export function isLineNearCandles(line: Line, candles: OHLCV[], marginPct: numbe
     return value >= c.low - margin && value <= c.high + margin;
   });
 }
-
-export const DEFAULT_CHECK_MARGIN_PCT = 0.002; // 0.2%
 
 /**
  * Open time of the most recent fully closed candle at `now`. Exchange candles are aligned to

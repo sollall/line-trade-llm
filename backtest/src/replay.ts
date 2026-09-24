@@ -46,8 +46,8 @@ function simulateTradeExit(
 
 /**
  * Replays one line against the candle history of its check_interval_minutes, running the same
- * periodic check the live Worker cron does on every closed candle (skip when price is far from the
- * line, otherwise ask the LLM for the line's state with the previous state as context), then
+ * periodic check the live Worker cron does on every closed candle (ask the LLM for the line's state
+ * with the previous state as context; with --margin-pct, skip candles where price is far away), then
  * simulates a trade whenever the state changes to broken_up / broken_down.
  *
  * Trade rule (not specified by the spec — v0.2 leaves execution/exit design
@@ -68,7 +68,7 @@ export async function replayLine(config: ReplayConfig, line: Line, candles: OHLC
   for (let i = 0; i < candles.length; i++) {
     const window = candles.slice(Math.max(0, i - config.candleWindow + 1), i + 1);
     const current = candles[i]!;
-    if (!isLineNearCandles(line, window, config.checkMarginPct)) continue;
+    if (config.checkMarginPct !== null && !isLineNearCandles(line, window, config.checkMarginPct)) continue;
 
     const context: LineCheckContext = {
       symbol: line.symbol,
