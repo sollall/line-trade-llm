@@ -62,6 +62,7 @@ npm run deploy:worker   # 本番デプロイ
 
 - [TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts)(Apache-2.0, CDN/jsdelivr)でローソク足を表示(データはWorkerの `GET /candles` 経由で取引所から取得)。ライセンス上の帰属表示としてチャート左下のTradingViewロゴ(`attributionLogo`)は有効のままにしています
 - Lightweight Chartsには描画ツールが無いため、水平線は `createPriceLine`、トレンドラインは自前のSeries Primitive(`frontend/app.js` の `TrendLinesPrimitive`)で描画しています。トレンドラインはタッチ判定(`shared/src/touch.ts` の `lineValueAt`)と同じく2点を通る直線として両方向に延長して表示します
+- 「Symbol」は `GET /symbols` で取得した、`EXCHANGE`(デフォルトはHyperliquid)で現在取引可能な銘柄だけをプルダウンで表示します(24h出来高の多い順)。Hyperliquidの場合はメインDEXのPerp銘柄で、上場廃止(delisted)銘柄は除外されます。一覧は「読み込み」ボタンで再取得します
 - 「時間足」で表示する足(1分〜日足)を切り替えられます。これは表示用で、Cron判定に使う足は `CANDLE_INTERVAL_MINUTES` のままです。ラインは時刻と価格で保存しているので、どの時間足で引いても同じラインとして扱われます
 - 初回は直近1000本を読み込み、チャートを左端近くまでスクロールすると更に1000本ずつ過去を読み込みます。取引所が返せる範囲が上限で、Hyperliquidは時間足ごとに直近5000本までしか返さないため、1分足なら約3.5日、15分足なら約52日、日足なら約13年が遡れる目安です
 - 「水平線」ボタン→チャートを1クリックで水平線を保存、「トレンドライン」ボタン→2クリックで保存
@@ -74,6 +75,7 @@ npm run deploy:worker   # 本番デプロイ
 | `POST /lines` | ライン登録。body: `{ symbol, kind: "horizontal"\|"trend", points: {price,timestamp}[] }` |
 | `GET /lines?symbol=` | ライン一覧取得 |
 | `DELETE /lines/{id}` | ライン削除 |
+| `GET /symbols` | `EXCHANGE` で取引可能な銘柄一覧。`[{ symbol, dayVolume }]` を24h出来高(quote建て)の降順で返す。Hyperliquidは `metaAndAssetCtxs` のメインDEX Perpから上場廃止銘柄を除いたもの |
 | `GET /candles?symbol=&interval=&limit=&endTime=` | チャート表示用のOHLCV取得(取引所へのプロキシ)。`interval`は分(1,3,5,15,30,60,120,240,480,720,1440、省略時は`CANDLE_INTERVAL_MINUTES`)、`limit`は`endTime`(epoch ms、省略時は現在)以前の本数で最大5000。取引所の1リクエストあたりの上限を超える分はページングして取得 |
 
 Cron Trigger(1分間隔)が全ラインを銘柄ごとにまとめて価格・ローソク足を取得し、タッチ検知→(タッチ済みなら)LLM判定を行い、`touch_events` に記録します。判定が`undetermined`の場合は次のCronサイクルで再判定します(仕様6.4)。API/LLM呼び出しの失敗は`status: failed`として次のCronに委ねます(仕様4.2)。
