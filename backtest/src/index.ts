@@ -1,10 +1,10 @@
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { getExchangeClient, type BacktestResult, type ExchangeId, type Line } from "shared";
+import { getExchangeClient, type BacktestResult, type ExchangeId, type Line, type OHLCV } from "shared";
 import { computeMetrics } from "./metrics.js";
-import { replaySymbol } from "./replay.js";
-import type { ReplayConfig } from "./types.js";
+import { replayLine } from "./replay.js";
+import type { ReplayCheckLog, ReplayConfig, SimulatedTrade } from "./types.js";
 
 function usage(): never {
   console.error(`Usage: npm run backtest -- --lines <lines.json> --symbol <SYM> [options]
@@ -17,10 +17,10 @@ Required:
 
 Options:
   --exchange <id>          hyperliquid | backpack (default: hyperliquid)
-  --interval <minutes>     Candle interval in minutes (default: 1)
-  --window <n>              Candles fed to the LLM per judgment (default: 15)
-  --threshold-pct <n>      Touch distance threshold, fraction of price (default: 0.0005)
-  --max-retries <n>        Max undetermined re-judgments before timeout (default: 8)
+  --interval <minutes>     Check timeframe for lines without check_interval_minutes (default: 15)
+  --window <n>              Closed candles fed to the LLM per check (default: 15)
+  --margin-pct <n>          Optional: skip the LLM when the line is farther than this fraction outside
+                            the window's low-high range (default: off, every candle is checked)
   --rr <n>                  Take-profit risk:reward multiple (default: 2)
   --max-hold-bars <n>       Max candles a simulated trade is held (default: 60)
   --llm <mode>              claude | mock (default: mock, no API cost)
@@ -39,10 +39,9 @@ async function main() {
       start: { type: "string" },
       end: { type: "string" },
       exchange: { type: "string", default: "hyperliquid" },
-      interval: { type: "string", default: "1" },
+      interval: { type: "string", default: "15" },
       window: { type: "string", default: "15" },
-      "threshold-pct": { type: "string", default: "0.0005" },
-      "max-retries": { type: "string", default: "8" },
+      "margin-pct": { type: "string" },
       rr: { type: "string", default: "2" },
       "max-hold-bars": { type: "string", default: "60" },
       llm: { type: "string", default: "mock" },
@@ -55,11 +54,38 @@ async function main() {
   if (!values.lines || !values.symbol || !values.start || !values.end) usage();
   if (values.llm !== "claude" && values.llm !== "mock") usage();
 
-  const linesRaw = await readFile(values.lines, "utf8");
-  const allLines = JSON.parse(linesRaw) as Line[];
-  const lines = allLines.filter((l) => l.symbol === values.symbol);
+  // `npm run backtest` runs inside the backtest/ workspace, so resolve relative paths against the
+  // directory npm was invoked from (INIT_CWD) rather than backtest/.
+  const baseDir = process.env.INIT_CWD ?? process.cwd();
+  const linesPath = path.resolve(baseDir, values.lines);
+  const outDir = path.resolve(baseDir, values.out!);
+
+  let linesRaw: string;
+  try {
+    linesRaw = await readFile(linesPath, "utf8");
+    console.error(`Loaded lines from ${linesPath}`);
+  } catch {
+    console.error(`Could not read ${linesPath}. Save the lines first, e.g.:
+  curl "http://localhost:8787/lines?symbol=${values.symbol}" > lines.json`);
+    process.exit(1);
+  }
+  let allLines: Line[];
+  try {
+    allLines = JSON.parse(linesRaw) as Line[];
+    if (!Array.isArray(allLines)) throw new Error("not an array");
+  } catch {
+    // An empty file usually means the curl export ran while the Worker was down or erroring.
+    console.error(`${linesPath} is empty or not a JSON array of lines. Export it again with the Worker running:
+  curl "http://localhost:8787/lines?symbol=${values.symbol}" > lines.json`);
+    process.exit(1);
+  }
+  const fallbackInterval = Number(values.interval);
+  // Lines exported before per-line check timeframes existed have no check_interval_minutes.
+  const lines = allLines
+    .filter((l) => l.symbol === values.symbol)
+    .map((l) => ({ ...l, check_interval_minutes: l.check_interval_minutes ?? fallbackInterval }));
   if (lines.length === 0) {
-    console.error(`No lines for symbol "${values.symbol}" found in ${values.lines}`);
+    console.error(`No lines for symbol "${values.symbol}" found in ${linesPath}`);
     process.exit(1);
   }
 
@@ -70,17 +96,9 @@ async function main() {
     process.exit(1);
   }
 
-  const client = getExchangeClient(values.exchange as ExchangeId);
-  const intervalMinutes = Number(values.interval);
-  console.error(`Fetching ${values.symbol} candles from ${values.exchange} (${values.start} -> ${values.end})...`);
-  const candles = await client.getCandles(values.symbol, intervalMinutes, startTime, endTime);
-  console.error(`Fetched ${candles.length} candles.`);
-
   const config: ReplayConfig = {
-    candleIntervalMinutes: intervalMinutes,
     candleWindow: Number(values.window),
-    touchThresholdPct: Number(values["threshold-pct"]),
-    maxUndeterminedRetries: Number(values["max-retries"]),
+    checkMarginPct: values["margin-pct"] === undefined ? null : Number(values["margin-pct"]),
     riskRewardRatio: Number(values.rr),
     maxHoldBars: Number(values["max-hold-bars"]),
     llmMode: values.llm as "claude" | "mock",
@@ -88,27 +106,66 @@ async function main() {
     claudeModel: values["claude-model"],
   };
 
-  console.error(`Replaying touch/judgment logic against ${lines.length} line(s), llm mode=${config.llmMode}...`);
-  const replayOutput = await replaySymbol(config, lines, candles);
-  const metrics = computeMetrics(replayOutput.trades);
+  const client = getExchangeClient(values.exchange as ExchangeId);
+  const candlesByInterval = new Map<number, OHLCV[]>();
+  for (const intervalMinutes of new Set(lines.map((l) => l.check_interval_minutes))) {
+    console.error(`Fetching ${values.symbol} ${intervalMinutes}m candles from ${values.exchange} (${values.start} -> ${values.end})...`);
+    const candles = await client.getCandles(values.symbol, intervalMinutes, startTime, endTime);
+    candlesByInterval.set(intervalMinutes, candles.sort((a, b) => a.timestamp - b.timestamp));
+    console.error(`Fetched ${candles.length} candles.`);
+    if (candles.length === 0) {
+      console.error(
+        `  No ${intervalMinutes}m candles returned for this period. Hyperliquid only serves the most recent 5000 candles per timeframe (15m: ~52 days, 1m: ~3.5 days), so pick a recent --start/--end.`,
+      );
+    }
+  }
+
+  console.error(`Replaying periodic line checks against ${lines.length} line(s), llm mode=${config.llmMode}...`);
+  const trades: SimulatedTrade[] = [];
+  const checkLog: ReplayCheckLog[] = [];
+  for (const line of lines) {
+    const candles = candlesByInterval.get(line.check_interval_minutes) ?? [];
+    const output = await replayLine(config, line, candles);
+    trades.push(...output.trades);
+    checkLog.push(...output.checkLog);
+
+    const changes = output.checkLog.filter((c) => c.state_changed).length;
+    const prices = line.points.map((p) => p.price).join(" -> ");
+    console.error(
+      `  ${line.id} (${line.kind} ${prices}, ${line.check_interval_minutes}m): ${output.checkLog.length} checks, ${changes} state changes, ${output.trades.length} trades`,
+    );
+    if (output.checkLog.length === 0 && candles.length > 0 && config.checkMarginPct !== null) {
+      const low = candles.reduce((min, c) => Math.min(min, c.low), Infinity);
+      const high = candles.reduce((max, c) => Math.max(max, c.high), -Infinity);
+      console.error(`    never near price: the period traded between ${low} and ${high}, so --margin-pct skipped every candle`);
+    }
+  }
+  // Drawdown depends on trade order, so interleave the lines' trades chronologically.
+  trades.sort((a, b) => a.entry_time - b.entry_time);
+  checkLog.sort((a, b) => a.candle_timestamp - b.candle_timestamp);
+  const metrics = computeMetrics(trades);
+
+  const allCandles = [...candlesByInterval.values()].flat();
+  const periodStart = allCandles.reduce((min, c) => Math.min(min, c.timestamp), Infinity);
+  const periodEnd = allCandles.reduce((max, c) => Math.max(max, c.timestamp), -Infinity);
 
   const backtestResult: BacktestResult = {
     id: crypto.randomUUID(),
-    period_start: new Date(replayOutput.period_start || startTime).toISOString(),
-    period_end: new Date(replayOutput.period_end || endTime).toISOString(),
+    period_start: new Date(allCandles.length ? periodStart : startTime).toISOString(),
+    period_end: new Date(allCandles.length ? periodEnd : endTime).toISOString(),
     win_rate: metrics.win_rate,
     profit_factor: metrics.profit_factor,
     max_drawdown: metrics.max_drawdown,
     total_trades: metrics.total_trades,
   };
 
-  await mkdir(values.out, { recursive: true });
-  await writeFile(path.join(values.out, "backtest_result.json"), JSON.stringify(backtestResult, null, 2));
-  await writeFile(path.join(values.out, "trades.json"), JSON.stringify(replayOutput.trades, null, 2));
-  await writeFile(path.join(values.out, "touch_log.json"), JSON.stringify(replayOutput.touchLog, null, 2));
+  await mkdir(outDir, { recursive: true });
+  await writeFile(path.join(outDir, "backtest_result.json"), JSON.stringify(backtestResult, null, 2));
+  await writeFile(path.join(outDir, "trades.json"), JSON.stringify(trades, null, 2));
+  await writeFile(path.join(outDir, "check_log.json"), JSON.stringify(checkLog, null, 2));
 
   console.log(JSON.stringify(backtestResult, null, 2));
-  console.error(`\nWrote results to ${values.out}/`);
+  console.error(`\nWrote results to ${outDir}/`);
 }
 
 main().catch((err) => {

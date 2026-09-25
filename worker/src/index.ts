@@ -1,7 +1,7 @@
 import { runCronPoll } from "./cron.js";
 import type { Env } from "./env.js";
 import { handleGetCandles } from "./routes/candles.js";
-import { handleCreateLine, handleDeleteLine, handleListLines } from "./routes/lines.js";
+import { handleCreateLine, handleDeleteLine, handleListLineChecks, handleListLines } from "./routes/lines.js";
 import { handleListSymbols } from "./routes/symbols.js";
 
 const CORS_HEADERS = {
@@ -34,6 +34,10 @@ export default {
       const lineIdMatch = url.pathname.match(/^\/lines\/([^/]+)$/);
       if (lineIdMatch && request.method === "DELETE") {
         return withCors(await handleDeleteLine(env, lineIdMatch[1]!));
+      }
+      const lineChecksMatch = url.pathname.match(/^\/lines\/([^/]+)\/checks$/);
+      if (lineChecksMatch && request.method === "GET") {
+        return withCors(await handleListLineChecks(request, env, lineChecksMatch[1]!));
       }
       if (url.pathname === "/candles" && request.method === "GET") {
         return withCors(await handleGetCandles(request, env));

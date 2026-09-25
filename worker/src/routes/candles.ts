@@ -1,8 +1,5 @@
-import { getExchangeClient, type OHLCV } from "shared";
-import { candleIntervalMinutes, type Env } from "../env.js";
-
-/** Timeframes (minutes) the chart UI may request — the ones both Hyperliquid and Backpack support. */
-const SUPPORTED_INTERVALS = new Set([1, 3, 5, 15, 30, 60, 120, 240, 480, 720, 1440]);
+import { getExchangeClient, SUPPORTED_INTERVALS, type OHLCV } from "shared";
+import { defaultCheckIntervalMinutes, type Env } from "../env.js";
 
 const DEFAULT_LIMIT = 1000;
 const MAX_LIMIT = 5000;
@@ -18,7 +15,7 @@ function json(data: unknown, status = 200): Response {
 
 /**
  * GET /candles?symbol=BTC&interval=15&limit=1000&endTime=<epoch ms> — chart data for the line-drawing UI.
- * - interval: timeframe in minutes (defaults to CANDLE_INTERVAL_MINUTES)
+ * - interval: timeframe in minutes (defaults to DEFAULT_CHECK_INTERVAL_MINUTES)
  * - limit: number of candles ending at endTime (max 5000)
  * - endTime: defaults to now; the UI passes the oldest loaded candle's time to page further back
  *
@@ -32,8 +29,8 @@ export async function handleGetCandles(request: Request, env: Env): Promise<Resp
   if (!symbol) return json({ error: "symbol query param is required" }, 400);
 
   const intervalParam = url.searchParams.get("interval");
-  const intervalMinutes = intervalParam === null ? candleIntervalMinutes(env) : Number(intervalParam);
-  if (!SUPPORTED_INTERVALS.has(intervalMinutes)) {
+  const intervalMinutes = intervalParam === null ? defaultCheckIntervalMinutes(env) : Number(intervalParam);
+  if (!SUPPORTED_INTERVALS.includes(intervalMinutes)) {
     return json({ error: `unsupported interval: ${intervalParam}` }, 400);
   }
 

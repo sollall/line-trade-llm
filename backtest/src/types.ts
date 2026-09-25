@@ -1,4 +1,4 @@
-import type { Line, LlmDecision, LlmJudgmentAttempt } from "shared";
+import type { LineState } from "shared";
 
 export type TradeDirection = "long" | "short";
 
@@ -13,29 +13,24 @@ export interface SimulatedTrade {
   exit_price: number;
   exit_reason: "stop_loss" | "take_profit" | "max_hold";
   pnl_pct: number; // (exit-entry)/entry, sign-adjusted for direction
-  /** How many candles the touch event spent as `undetermined` before resolving. */
-  bars_to_resolve: number;
 }
 
-export interface ReplayTouchLog {
+/** One periodic check during the replay, mirroring the live Worker's line_checks rows. */
+export interface ReplayCheckLog {
   line_id: string;
-  touched_at: number;
-  resolved_status: "confirmed" | "rejected" | "timeout";
-  decision: LlmDecision | null;
-  bars_to_resolve: number;
-  attempts: LlmJudgmentAttempt[];
-}
-
-export interface ReplayInput {
-  symbol: string;
-  lines: Line[];
+  candle_timestamp: number;
+  state: LineState;
+  previous_state: LineState | null;
+  state_changed: boolean;
+  confidence: number;
+  reasoning: string;
+  prompt: string;
 }
 
 export interface ReplayConfig {
-  candleIntervalMinutes: number;
   candleWindow: number;
-  touchThresholdPct: number;
-  maxUndeterminedRetries: number;
+  /** null = send every line to the LLM on every candle (the default, same as the live Worker). */
+  checkMarginPct: number | null;
   riskRewardRatio: number;
   maxHoldBars: number;
   llmMode: "claude" | "mock";
@@ -44,8 +39,6 @@ export interface ReplayConfig {
 }
 
 export interface ReplayOutput {
-  period_start: number;
-  period_end: number;
   trades: SimulatedTrade[];
-  touchLog: ReplayTouchLog[];
+  checkLog: ReplayCheckLog[];
 }

@@ -7,25 +7,27 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
 
   EXCHANGE: ExchangeId;
-  CANDLE_INTERVAL_MINUTES: string;
+  DEFAULT_CHECK_INTERVAL_MINUTES: string;
   CANDLE_WINDOW: string;
-  TOUCH_THRESHOLD_PCT: string;
-  MAX_UNDETERMINED_RETRIES: string;
+  CHECK_MARGIN_PCT?: string;
   CLAUDE_MODEL: string;
 }
 
-export function candleIntervalMinutes(env: Env): number {
-  return Number(env.CANDLE_INTERVAL_MINUTES) || 1;
+/** Check timeframe for lines created without one, and the default /candles timeframe. */
+export function defaultCheckIntervalMinutes(env: Env): number {
+  return Number(env.DEFAULT_CHECK_INTERVAL_MINUTES) || 15;
 }
 
 export function candleWindow(env: Env): number {
   return Number(env.CANDLE_WINDOW) || 15;
 }
 
-export function touchThresholdPct(env: Env): number {
-  return Number(env.TOUCH_THRESHOLD_PCT) || 0.0005;
+/** Optional cost filter: skip the LLM for lines this far outside recent prices. null = check every line. */
+export function checkMarginPct(env: Env): number | null {
+  const value = Number(env.CHECK_MARGIN_PCT);
+  return env.CHECK_MARGIN_PCT && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-export function maxUndeterminedRetries(env: Env): number {
-  return Number(env.MAX_UNDETERMINED_RETRIES) || 8;
+export function claudeModel(env: Env): string {
+  return env.CLAUDE_MODEL || "claude-sonnet-5";
 }

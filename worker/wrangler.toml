@@ -2,22 +2,21 @@ name = "line-trade-llm"
 main = "src/index.ts"
 compatibility_date = "2024-09-23"
 
-# 1-minute poll, per spec section 4 (Cron Trigger). Free plan allows down to
-# 1-minute intervals.
+# Runs every minute; each line is checked only when a candle of its own
+# check_interval_minutes has just closed (catching up if a tick was missed).
 [triggers]
 crons = ["* * * * *"]
 
 [vars]
 # Which exchange to poll live. "hyperliquid" | "backpack".
 EXCHANGE = "hyperliquid"
-# Candle interval used both for touch polling context and backtests, minutes.
-CANDLE_INTERVAL_MINUTES = "1"
-# How many recent candles are fed to the LLM per judgment.
+# Check timeframe (minutes) for lines created without one; also the default GET /candles timeframe.
+DEFAULT_CHECK_INTERVAL_MINUTES = "15"
+# How many recent closed candles are fed to the LLM per check.
 CANDLE_WINDOW = "15"
-# Relative distance (fraction of price) within which a touch is registered.
-TOUCH_THRESHOLD_PCT = "0.0005"
-# Max undetermined re-judgments before a touch event times out (spec 6.4).
-MAX_UNDETERMINED_RETRIES = "8"
+# Every line is sent to the LLM on every close of its check timeframe. To cut API calls, uncomment
+# this to skip lines lying outside the recent candles' low-high range widened by this fraction.
+# CHECK_MARGIN_PCT = "0.002"
 CLAUDE_MODEL = "claude-sonnet-5"
 
 # `wrangler d1 create line_trade_llm` then paste the returned database_id here.

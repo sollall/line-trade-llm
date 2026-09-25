@@ -5,10 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "dev:test": "wrangler dev --test-scheduled",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "db:migrate:local": "wrangler d1 execute line_trade_llm --local --file=./schema.sql",
-    "db:migrate:remote": "wrangler d1 execute line_trade_llm --remote --file=./schema.sql"
+    "db:migrate:remote": "wrangler d1 execute line_trade_llm --remote --file=./schema.sql",
+    "db:migrate:periodic:local": "wrangler d1 execute line_trade_llm --local --file=./migrations/0001_periodic_line_checks.sql",
+    "db:migrate:periodic:remote": "wrangler d1 execute line_trade_llm --remote --file=./migrations/0001_periodic_line_checks.sql",
+    "db:clear:local": "wrangler d1 execute line_trade_llm --local --command \"DELETE FROM line_checks; DELETE FROM lines;\"",
+    "db:reset:local": "rm -rf .wrangler/state && npm run db:migrate:local"
   },
   "dependencies": {
     "shared": "*"
